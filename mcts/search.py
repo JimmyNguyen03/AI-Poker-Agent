@@ -1,5 +1,5 @@
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .node import Node
 from .state import PokerState
@@ -64,13 +64,19 @@ def _rollout_value(state: PokerState) -> float:
     return max(-1.0, min(1.0, stack_delta / norm))
 
 
-def _simulate_from(node: Node, rollout_depth: int = 8) -> float:
+def _simulate_from(
+    node: Node,
+    rollout_depth: int = 8,
+    value_estimator: Optional[Callable[[PokerState], float]] = None,
+) -> float:
     state = node.state
     depth = 0
     while not state.is_terminal() and depth < rollout_depth and state.legal_actions:
         action = random.choice(list(state.legal_actions))
         state = _apply_heuristic_transition(state, action)
         depth += 1
+    if value_estimator is not None and not state.is_terminal():
+        return max(-1.0, min(1.0, float(value_estimator(state))))
     return _rollout_value(state)
 
 
@@ -87,6 +93,7 @@ def run_mcts(
     num_simulations: int = 250,
     exploration: float = 1.4,
     rollout_depth: int = 8,
+    value_estimator: Optional[Callable[[PokerState], float]] = None,
 ) -> Tuple[str, Dict[str, Dict[str, float]]]:
     root = Node(state=root_state)
     if not root.state.legal_actions:
@@ -104,7 +111,7 @@ def run_mcts(
             node = _expand(node)
 
         # Simulation
-        reward = _simulate_from(node, rollout_depth=rollout_depth)
+        reward = _simulate_from(node, rollout_depth=rollout_depth, value_estimator=value_estimator)
 
         # Backpropagation
         while node is not None:

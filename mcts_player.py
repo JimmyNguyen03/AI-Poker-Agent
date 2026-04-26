@@ -8,11 +8,21 @@ from mcts.state import build_state
 class MCTSPlayer(BasePokerPlayer):
     """Starter MCTS agent for COMPSCI 683 poker project."""
 
-    def __init__(self, simulations: int = 250, exploration: float = 1.4):
+    def __init__(
+        self,
+        simulations: int = 250,
+        exploration: float = 1.4,
+        value_model_path: str = "",
+    ):
         super().__init__()
         self.simulations = simulations
         self.exploration = exploration
         self.last_search_info = {}
+        self._value_model = None
+        if value_model_path:
+            from offline_learning.value_model import LinearValueModel
+
+            self._value_model = LinearValueModel.load(value_model_path)
 
     def declare_action(self, valid_actions, hole_card, round_state):
         # Build root state from callback payload.
@@ -29,13 +39,19 @@ class MCTSPlayer(BasePokerPlayer):
             num_simulations=self.simulations,
             exploration=self.exploration,
             rollout_depth=8,
+            value_estimator=self._estimate_value if self._value_model is not None else None,
         )
         self.last_search_info = diagnostics
 
         action, amount = to_engine_action(best_action, valid_actions, round_state)
         if amount is None:
-            return action
-        return action, amount
+            amount = 0
+        return action, int(amount)
+
+    def _estimate_value(self, state):
+        from offline_learning.features import state_to_features
+
+        return self._value_model.predict(state_to_features(state))
 
     def receive_game_start_message(self, game_info):
         pass
