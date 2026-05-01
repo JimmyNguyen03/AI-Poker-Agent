@@ -36,7 +36,7 @@ class LoggingMCTSPlayer(MCTSPlayer):
         self._round_index = int(round_count)
 
     def declare_action(self, valid_actions, hole_card, round_state):
-        action, amount = super().declare_action(valid_actions, hole_card, round_state)
+        action = super().declare_action(valid_actions, hole_card, round_state)
         state = build_state(
             hero_uuid=self.uuid,
             valid_actions=valid_actions,
@@ -52,11 +52,11 @@ class LoggingMCTSPlayer(MCTSPlayer):
                     "pot_main": float(state.pot_main),
                     "hero_stack": float(state.hero_stack),
                     "opp_stack": float(state.opp_stack),
-                    "chosen_amount": float(amount),
+                    "chosen_amount": 0.0,
                 },
             }
         )
-        return action, amount
+        return action
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         winner_uuids = {winner.get("uuid") for winner in winners if "uuid" in winner}

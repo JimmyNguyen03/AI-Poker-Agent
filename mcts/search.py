@@ -6,11 +6,7 @@ from .state import PokerState
 
 
 def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
-    """Cheap transition model for starter MCTS.
-
-    This does not fully emulate hidden cards; it approximates immediate effects
-    and is intended as a scaffold you can later replace with Emulator rollouts.
-    """
+    
     hero_stack = state.hero_stack
     opp_stack = state.opp_stack
     pot = state.pot_main
@@ -42,11 +38,16 @@ def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
         street=street,
         next_player=1 - state.next_player,
         small_blind_amount=state.small_blind_amount,
+        hero_is_next=not state.hero_is_next,
         community_card=state.community_card,
         pot_main=pot,
         hero_stack=hero_stack,
         opp_stack=opp_stack,
         legal_actions=tuple(next_legal),
+        opp_fold_rate=state.opp_fold_rate,
+        opp_call_rate=state.opp_call_rate,
+        opp_raise_rate=state.opp_raise_rate,
+        opp_strength_estimate=state.opp_strength_estimate,
         round_state_raw=state.round_state_raw,
     )
 
@@ -61,7 +62,34 @@ def _rollout_value(state: PokerState) -> float:
         return 0.0
     stack_delta = state.hero_stack - state.opp_stack
     norm = max(state.hero_stack + state.opp_stack, 1)
-    return max(-1.0, min(1.0, stack_delta / norm))
+    base_value = stack_delta / norm
+    belief_adjustment = 0.35 * (0.5 - state.opp_strength_estimate)
+    return max(-1.0, min(1.0, base_value + belief_adjustment))
+
+
+def _sample_rollout_action(state: PokerState) -> str:
+    legal = list(state.legal_actions)
+    if len(legal) == 1:
+        return legal[0]
+
+    if state.hero_is_next:
+        raise_weight = 0.8 + (1.2 * state.opp_fold_rate)
+        call_weight = 1.0 + state.opp_call_rate
+        fold_weight = max(0.15, 1.0 - 0.5 * state.opp_fold_rate)
+    else:
+        raise_weight = 0.8 + (2.0 * state.opp_raise_rate)
+        call_weight = 0.8 + (1.8 * state.opp_call_rate)
+        fold_weight = max(0.15, 0.8 + (2.0 * state.opp_fold_rate))
+
+    weights = []
+    for action in legal:
+        if action == "raise":
+            weights.append(raise_weight)
+        elif action == "call":
+            weights.append(call_weight)
+        else:
+            weights.append(fold_weight)
+    return random.choices(legal, weights=weights, k=1)[0]
 
 
 def _simulate_from(
@@ -72,7 +100,7 @@ def _simulate_from(
     state = node.state
     depth = 0
     while not state.is_terminal() and depth < rollout_depth and state.legal_actions:
-        action = random.choice(list(state.legal_actions))
+        action = _sample_rollout_action(state)
         state = _apply_heuristic_transition(state, action)
         depth += 1
     if value_estimator is not None and not state.is_terminal():

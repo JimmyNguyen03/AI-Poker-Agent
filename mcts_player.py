@@ -1,6 +1,6 @@
 from pypokerengine.players import BasePokerPlayer
 
-from mcts.legal_actions import to_engine_action
+from mcts.belief import OpponentBeliefModel
 from mcts.search import run_mcts
 from mcts.state import build_state
 
@@ -18,6 +18,7 @@ class MCTSPlayer(BasePokerPlayer):
         self.simulations = simulations
         self.exploration = exploration
         self.last_search_info = {}
+        self._belief_model = OpponentBeliefModel()
         self._value_model = None
         if value_model_path:
             from offline_learning.value_model import LinearValueModel
@@ -31,6 +32,7 @@ class MCTSPlayer(BasePokerPlayer):
             valid_actions=valid_actions,
             hole_card=hole_card,
             round_state=round_state,
+            belief_snapshot=self._belief_model.snapshot(),
         )
 
         # Run bounded MCTS (simulation budget can be tuned for time constraints).
@@ -43,18 +45,19 @@ class MCTSPlayer(BasePokerPlayer):
         )
         self.last_search_info = diagnostics
 
-        action, amount = to_engine_action(best_action, valid_actions, round_state)
-        if amount is None:
-            amount = 0
-        return action, int(amount)
+        # This engine expects action string only.
+        return best_action
 
     def _estimate_value(self, state):
         from offline_learning.features import state_to_features
 
         return self._value_model.predict(state_to_features(state))
 
+    def get_belief_snapshot(self):
+        return self._belief_model.snapshot()
+
     def receive_game_start_message(self, game_info):
-        pass
+        self._belief_model = OpponentBeliefModel()
 
     def receive_round_start_message(self, round_count, hole_card, seats):
         pass
@@ -63,7 +66,7 @@ class MCTSPlayer(BasePokerPlayer):
         pass
 
     def receive_game_update_message(self, action, round_state):
-        pass
+        self._belief_model.observe(action, self.uuid)
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         pass

@@ -21,8 +21,13 @@ def state_to_features(state: PokerState) -> List[float]:
         float(state.pot_main) / total_stack,
         STREET_TO_INDEX.get(state.street, 0.0) / 4.0,
         float(len(state.community_card)) / 5.0,
+        1.0 if state.hero_is_next else 0.0,
         1.0 if "fold" in state.legal_actions else 0.0,
         1.0 if "call" in state.legal_actions else 0.0,
         1.0 if "raise" in state.legal_actions else 0.0,
+        float(state.opp_fold_rate),
+        float(state.opp_call_rate),
+        float(state.opp_raise_rate),
+        float(state.opp_strength_estimate),
     ]
 

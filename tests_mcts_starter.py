@@ -28,6 +28,28 @@ def test_state_builder():
     assert state.hero_uuid == "hero"
     assert state.pot_main == 30
     assert state.legal_actions == ("fold", "call", "raise")
+    assert state.hero_is_next is True
+    assert abs(state.opp_fold_rate - (1.0 / 3.0)) < 1e-9
+
+
+def test_state_builder_with_belief_snapshot():
+    valid_actions = [{"action": "fold"}, {"action": "call"}, {"action": "raise"}]
+    state = build_state(
+        hero_uuid="hero",
+        valid_actions=valid_actions,
+        hole_card=["SA", "HK"],
+        round_state=_sample_round_state(),
+        belief_snapshot={
+            "opp_fold_rate": 0.55,
+            "opp_call_rate": 0.30,
+            "opp_raise_rate": 0.15,
+            "opp_strength_estimate": 0.35,
+        },
+    )
+    assert abs(state.opp_fold_rate - 0.55) < 1e-9
+    assert abs(state.opp_call_rate - 0.30) < 1e-9
+    assert abs(state.opp_raise_rate - 0.15) < 1e-9
+    assert abs(state.opp_strength_estimate - 0.35) < 1e-9
 
 
 def test_legal_actions():
@@ -58,6 +80,7 @@ def test_mcts_output_action_is_legal():
 
 if __name__ == "__main__":
     test_state_builder()
+    test_state_builder_with_belief_snapshot()
     test_legal_actions()
     test_mcts_output_action_is_legal()
     print("MCTS starter tests passed.")
