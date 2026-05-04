@@ -3,6 +3,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List
 
+# Bump when on-disk label semantics change so replay/training can ignore stale rows.
+TARGET_SCHEMA_VERSION = 2
+
 
 @dataclass
 class DecisionSample:
@@ -13,9 +16,14 @@ class DecisionSample:
     legal_actions: List[str]
     features: List[float]
     terminal_reward: float
+    # Normalized chip change from this decision to round end: clip(delta / norm_stack, -1, 1).
+    training_target: float
+    # Same scale as mcts/search._rollout_value at this decision state (see features.mcts_rollout_leaf_value).
+    rollout_aligned_target: float
     final_hero_stack: int
     final_opp_stack: int
     metadata: Dict[str, float]
+    target_schema: int = TARGET_SCHEMA_VERSION
 
 
 class JsonlDatasetWriter:

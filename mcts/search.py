@@ -1,35 +1,62 @@
 import random
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .node import Node
 from .state import PokerState
 
 
+def _limit_raise_increment_chips(small_blind: int, street: str) -> int:
+    """Match fixed-limit engine / abstraction_heuristics: preflop+flop 2*sb, turn+river 4*sb."""
+    if street in ("preflop", "flop"):
+        return 2 * small_blind
+    if street in ("turn", "river"):
+        return 4 * small_blind
+    return 0
+
+
+def _board_prefix_for_street(round_state_raw: Dict[str, Any], street: str) -> Tuple[str, ...]:
+    """
+    When the abstract model advances street, use board cards from the same engine snapshot
+    (root round_state_raw) so rollouts do not play the turn with a preflop-only board.
+    """
+    raw_cards = list(round_state_raw.get("community_card", []))
+    want = {"preflop": 0, "flop": 3, "turn": 4, "river": 5, "showdown": len(raw_cards)}.get(
+        street, len(raw_cards)
+    )
+    if want > len(raw_cards):
+        want = len(raw_cards)
+    return tuple(raw_cards[:want])
+
+
 def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
-    
     hero_stack = state.hero_stack
     opp_stack = state.opp_stack
     pot = state.pot_main
     sb = state.small_blind_amount
     street_order = ["preflop", "flop", "turn", "river", "showdown"]
     idx = street_order.index(state.street) if state.street in street_order else 0
+    inc = _limit_raise_increment_chips(sb, state.street)
 
     if action == "fold":
         # Folding loses current investment opportunity.
         hero_stack = max(0, hero_stack - sb)
         street = "showdown"
+        community = _board_prefix_for_street(state.round_state_raw, street)
     elif action == "call":
-        call_cost = sb if state.street in ("preflop", "flop") else 2 * sb
-        hero_stack = max(0, hero_stack - call_cost)
-        opp_stack = max(0, opp_stack - call_cost)
-        pot += 2 * call_cost
+        # Symmetric toy model: call costs half a min-raise increment each (matches prior sb vs 2*sb split).
+        pay = max(1, inc // 2) if inc else sb
+        hero_stack = max(0, hero_stack - pay)
+        opp_stack = max(0, opp_stack - pay)
+        pot += 2 * pay
         street = street_order[min(idx + 1, len(street_order) - 1)]
+        community = _board_prefix_for_street(state.round_state_raw, street)
     else:  # raise
-        raise_cost = 2 * sb if state.street in ("preflop", "flop") else 4 * sb
-        hero_stack = max(0, hero_stack - raise_cost)
-        opp_stack = max(0, opp_stack - raise_cost)
-        pot += 2 * raise_cost
+        pay = inc if inc else 2 * sb
+        hero_stack = max(0, hero_stack - pay)
+        opp_stack = max(0, opp_stack - pay)
+        pot += 2 * pay
         street = street_order[min(idx + 1, len(street_order) - 1)]
+        community = _board_prefix_for_street(state.round_state_raw, street)
 
     next_legal = ("fold", "call", "raise") if street != "showdown" else tuple()
     return PokerState(
@@ -39,7 +66,7 @@ def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
         next_player=1 - state.next_player,
         small_blind_amount=state.small_blind_amount,
         hero_is_next=not state.hero_is_next,
-        community_card=state.community_card,
+        community_card=community,
         pot_main=pot,
         hero_stack=hero_stack,
         opp_stack=opp_stack,

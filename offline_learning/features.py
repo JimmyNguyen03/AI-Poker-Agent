@@ -1,13 +1,68 @@
-from typing import List
+from typing import Any, Dict, List
 
 from heuristics.abstraction_heuristics import build_cutoff_abstraction
 from heuristics.hand_features import MODEL_FEATURE_KEYS
 from mcts.state import PokerState
 
 
+def mcts_rollout_leaf_value(state: PokerState) -> float:
+    """
+    Mirror of mcts.search._rollout_value (heuristic leaf prior in [-1, 1]).
+    Keep in sync if groupmates change search rollouts.
+    """
+    if state.street == "showdown":
+        if state.hero_stack > state.opp_stack:
+            return 1.0
+        if state.hero_stack < state.opp_stack:
+            return -1.0
+        return 0.0
+    stack_delta = state.hero_stack - state.opp_stack
+    norm = max(state.hero_stack + state.opp_stack, 1)
+    base_value = stack_delta / norm
+    belief_adjustment = 0.35 * (0.5 - state.opp_strength_estimate)
+    v = base_value + belief_adjustment
+    return max(-1.0, min(1.0, v))
+
+
+def _round_state_aligned_with_poker_state(state: PokerState) -> Dict[str, Any]:
+    """
+    Heuristics read stacks/pot/street/board from round_state; MCTS updates PokerState only.
+    Overlay PokerState onto a copy so training and MCTS value calls see one consistent snapshot.
+    """
+    raw = state.round_state_raw
+    aligned: Dict[str, Any] = dict(raw)
+    aligned["street"] = state.street
+    aligned["community_card"] = list(state.community_card)
+
+    new_seats: List[Dict[str, Any]] = []
+    for seat in raw.get("seats", []):
+        s = dict(seat)
+        uid = s.get("uuid")
+        if uid == state.hero_uuid:
+            s["stack"] = state.hero_stack
+        elif uid and uid != state.hero_uuid:
+            s["stack"] = state.opp_stack
+        new_seats.append(s)
+    aligned["seats"] = new_seats
+
+    pot = raw.get("pot", {})
+    if isinstance(pot, dict):
+        main = pot.get("main", {})
+        if isinstance(main, dict):
+            new_main = dict(main)
+            new_main["amount"] = state.pot_main
+            aligned["pot"] = {**pot, "main": new_main}
+        else:
+            aligned["pot"] = {**pot, "main": {"amount": state.pot_main}}
+    else:
+        aligned["pot"] = {"main": {"amount": state.pot_main}}
+
+    return aligned
+
+
 def state_to_features(state: PokerState) -> List[float]:
     """Feature vector aligned with heuristics.hand_features.MODEL_FEATURE_KEYS for value training."""
-    round_state = state.round_state_raw
+    round_state = _round_state_aligned_with_poker_state(state)
     cutoff = build_cutoff_abstraction(
         hero_uuid=state.hero_uuid,
         hole_card=list(state.hole_card),

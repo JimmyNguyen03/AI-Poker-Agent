@@ -1,21 +1,96 @@
-import sys
 import json
+import shutil
+import sys
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+from tqdm import tqdm
 
 # Support script execution from repo root.
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pypokerengine.api.game import setup_config, start_poker
+# Windows: pypokerengine's timeout2 uses SIGALRM, which is unavailable. Replace before game imports it.
+import pypokerengine.utils.timeout_decorator as _poker_timeout  # noqa: E402
+
+def _timeout2_noop(seconds=None, defaultretval="Blah", **kwargs):  # noqa: ARG001
+    def decorate(function):
+        return function
+
+    return decorate
+
+
+_poker_timeout.timeout2 = _timeout2_noop
+
+from pypokerengine.api.game import setup_config, start_poker  # noqa: E402
 from mcts.state import build_state
 from mcts_player import MCTSPlayer
 from randomplayer import RandomPlayer
-from offline_learning.data import DecisionSample, JsonlDatasetWriter
-from offline_learning.features import state_to_features
+from offline_learning.data import TARGET_SCHEMA_VERSION, DecisionSample, JsonlDatasetWriter
+from offline_learning.features import mcts_rollout_leaf_value, state_to_features
 from offline_learning.train_value_model import train_value_model
+
+
+def _status(msg: str) -> None:
+    """Log one line without breaking tqdm progress bars."""
+    tqdm.write(msg)
+
+
+_DEFAULT_SELF_PLAY_JSONL = "offline_learning/data/self_play.jsonl"
+
+
+def _sanitize_run_name(name: str) -> str:
+    n = name.strip()
+    if not n:
+        return "run"
+    for sep in ("/", "\\"):
+        n = n.replace(sep, "_")
+    while ".." in n:
+        n = n.replace("..", "_")
+    return n or "run"
+
+
+def submission_value_model_destinations(run_models_dir: Optional[Path] = None) -> Tuple[Path, Optional[Path]]:
+    """
+    Paths for the frozen "submit this" checkpoint.
+    Standard path is what mcts_player.setup_ai and submission/custom_player load.
+    Optional second path is a copy under the current run's models/ folder.
+    """
+    standard = Path(__file__).resolve().parent / "models" / "submission_value_model.json"
+    run_copy = (run_models_dir / "submission_value_model.json") if run_models_dir is not None else None
+    return standard, run_copy
+
+
+def export_best_model_for_submission(best_model_path: str, run_models_dir: Optional[Path] = None) -> Dict[str, str]:
+    """
+    Copy the best checkpoint JSON to submission_value_model.json (repo + optional run folder).
+    Returns absolute paths written under keys 'standard' and 'run_copy' (if used).
+    """
+    src = Path(best_model_path)
+    out: Dict[str, str] = {}
+    if not src.is_file():
+        return out
+    standard, run_dest = submission_value_model_destinations(run_models_dir)
+    standard.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, standard)
+    out["standard"] = str(standard.resolve())
+    if run_dest is not None:
+        run_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, run_dest)
+        out["run_copy"] = str(run_dest.resolve())
+    return out
+
+
+def resolve_run_directory(output_dir: str, run_name: str = "") -> Path:
+    """
+    If run_name is non-empty: <output_dir>/runs/<run_name>/ (sanitized).
+    Else: <output_dir>/ as given (default iterative layout stays under offline_learning/).
+    """
+    base = Path(output_dir)
+    if run_name.strip():
+        return (base / "runs" / _sanitize_run_name(run_name)).resolve()
+    return base.resolve()
 
 
 def _stack_by_uuid(round_state: Dict, target_uuid: str) -> Tuple[int, int]:
@@ -25,24 +100,38 @@ def _stack_by_uuid(round_state: Dict, target_uuid: str) -> Tuple[int, int]:
     return int(hero.get("stack", 0)), int(opp.get("stack", 0))
 
 
+def _round_training_target(chip_delta: int, norm: int) -> float:
+    """Scale chip swing into [-1, 1] for value fitting, normalized by pot size at decision time."""
+    if norm <= 0:
+        return 0.0
+    x = float(chip_delta) / float(norm)
+    return max(-1.0, min(1.0, x))
+
+
 class LoggingMCTSPlayer(MCTSPlayer):
     def __init__(
         self,
         game_index: int,
         sink: List[DecisionSample],
+        initial_stack: int = 1000,
         value_model_path: str = "",
+        rollout_depth: int = 8,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.game_index = game_index
         self.sink = sink
+        self._initial_stack = max(1, int(initial_stack))
         self.value_model_path = value_model_path
         self._pending: List[Dict] = []
         self._round_index = 0
+        self._hero_stack_round_start = 0
 
     def receive_round_start_message(self, round_count, hole_card, seats):
         self._pending = []
         self._round_index = int(round_count)
+        hero_seat = next((s for s in seats if s.get("uuid") == self.uuid), None)
+        self._hero_stack_round_start = int(hero_seat.get("stack", 0)) if hero_seat else 0
 
     def declare_action(self, valid_actions, hole_card, round_state):
         action = super().declare_action(valid_actions, hole_card, round_state)
@@ -58,6 +147,8 @@ class LoggingMCTSPlayer(MCTSPlayer):
                 "action": action,
                 "legal_actions": list(state.legal_actions),
                 "features": state_to_features(state),
+                "hero_stack_at_decision": int(state.hero_stack),
+                "rollout_aligned_target": float(mcts_rollout_leaf_value(state)),
                 "metadata": {
                     "pot_main": float(state.pot_main),
                     "hero_stack": float(state.hero_stack),
@@ -78,7 +169,17 @@ class LoggingMCTSPlayer(MCTSPlayer):
         else:
             reward = 0.0
         final_hero_stack, final_opp_stack = _stack_by_uuid(round_state, self.uuid)
+        round_chip_delta = final_hero_stack - self._hero_stack_round_start
         for row in self._pending:
+            hero_at_decision = int(row["hero_stack_at_decision"])
+            per_decision_delta = final_hero_stack - hero_at_decision
+            pot_at_decision = max(1, int(row["metadata"]["pot_main"]))
+            training_target = _round_training_target(per_decision_delta, pot_at_decision)
+            meta = dict(row["metadata"])
+            meta["round_chip_delta"] = float(round_chip_delta)
+            meta["hero_stack_round_start"] = float(self._hero_stack_round_start)
+            meta["hero_stack_at_decision"] = float(hero_at_decision)
+            meta["per_decision_chip_delta"] = float(per_decision_delta)
             self.sink.append(
                 DecisionSample(
                     game_index=self.game_index,
@@ -88,9 +189,11 @@ class LoggingMCTSPlayer(MCTSPlayer):
                     legal_actions=row["legal_actions"],
                     features=row["features"],
                     terminal_reward=reward,
+                    training_target=training_target,
+                    rollout_aligned_target=float(row["rollout_aligned_target"]),
                     final_hero_stack=final_hero_stack,
                     final_opp_stack=final_opp_stack,
-                    metadata=row["metadata"],
+                    metadata=meta,
                 )
             )
 
@@ -103,9 +206,10 @@ def generate_self_play_dataset(
     initial_stack: int = 1000,
     small_blind_amount: int = 10,
     value_model_path: str = "",
+    rollout_depth: int = 8,
 ) -> Dict[str, float]:
     rows: List[DecisionSample] = []
-    for game_idx in range(num_games):
+    for game_idx in tqdm(range(num_games), desc="Generating self-play dataset"):
         config = setup_config(
             max_round=rounds_per_game,
             initial_stack=initial_stack,
@@ -116,8 +220,10 @@ def generate_self_play_dataset(
             algorithm=LoggingMCTSPlayer(
                 game_index=game_idx,
                 sink=rows,
+                initial_stack=initial_stack,
                 simulations=simulations,
                 value_model_path=value_model_path,
+                rollout_depth=rollout_depth,
             ),
         )
         config.register_player(
@@ -125,8 +231,10 @@ def generate_self_play_dataset(
             algorithm=LoggingMCTSPlayer(
                 game_index=game_idx,
                 sink=rows,
+                initial_stack=initial_stack,
                 simulations=simulations,
                 value_model_path=value_model_path,
+                rollout_depth=rollout_depth,
             ),
         )
         start_poker(config, verbose=0)
@@ -136,10 +244,12 @@ def generate_self_play_dataset(
             writer.write(row)
 
     mean_reward = sum(r.terminal_reward for r in rows) / max(1, len(rows))
+    mean_training_target = sum(r.training_target for r in rows) / max(1, len(rows))
     return {
         "num_games": float(num_games),
         "rows_written": float(len(rows)),
         "mean_reward": float(mean_reward),
+        "mean_training_target": float(mean_training_target),
     }
 
 
@@ -160,7 +270,7 @@ def _evaluate_matchup(
     hero_wins = 0
     opp_wins = 0
     draws = 0
-    for _ in range(num_games):
+    for _ in tqdm(range(num_games), desc="Evaluating matchup"):
         config = setup_config(
             max_round=rounds_per_game,
             initial_stack=initial_stack,
@@ -190,6 +300,35 @@ def _evaluate_matchup(
         "draw_rate": float(draws) / n,
         "avg_stack_delta": (hero_final_sum - opp_final_sum) / n,
     }
+
+
+def _prune_replay_buffer(replay_path: str, schema: int = TARGET_SCHEMA_VERSION) -> Tuple[int, int]:
+    """
+    Drop jsonl rows whose target_schema != schema (legacy self-play formats).
+    Rewrites the file only when at least one row is removed.
+    Returns (kept_count, dropped_count).
+    """
+    path = Path(replay_path)
+    if not path.is_file():
+        return 0, 0
+    kept_lines: List[str] = []
+    dropped = 0
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            dropped += 1
+            continue
+        if int(item.get("target_schema", 1)) != int(schema):
+            dropped += 1
+            continue
+        kept_lines.append(raw.strip())
+    kept = len(kept_lines)
+    if dropped:
+        path.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
+    return kept, dropped
 
 
 def _append_jsonl_records(source_path: str, target_path: str) -> int:
@@ -230,6 +369,7 @@ def evaluate_model_against_baselines(
 
     results: Dict[str, Dict[str, float]] = {}
     for name, factory in baselines.items():
+        print(f"Evaluating {name} vs candidate")
         results[name] = _evaluate_matchup(
             hero_factory=candidate,
             opp_factory=factory,
@@ -252,6 +392,10 @@ def run_iterative_rl_training(
     small_blind_amount: int = 10,
     epochs_per_iter: int = 5,
     learning_rate: float = 0.01,
+    value_model_kind: str = "linear",
+    mlp_hidden_dim: int = 32,
+    regression_target: str = "rollout",
+    rollout_depth: int = 8,
 ) -> Dict[str, object]:
     """
     Explicit RL-style loop:
@@ -271,8 +415,22 @@ def run_iterative_rl_training(
     replay_path = str(data_dir / "replay_buffer.jsonl")
     current_best_model = ""
     iteration_summaries: List[Dict[str, object]] = []
+    n_iter = max(1, iterations)
 
-    for iter_idx in range(1, max(1, iterations) + 1):
+    _status(
+        f"RL | iterations={n_iter} | replay={replay_path} | "
+        f"games/iter={self_play_games} | eval_games/baseline={eval_games} | "
+        f"value_model={value_model_kind}"
+        + (f" (hidden={mlp_hidden_dim})" if value_model_kind.lower() == "mlp" else "")
+        + f" | y={regression_target}"
+    )
+
+    k_prune, d_prune = _prune_replay_buffer(replay_path)
+    if d_prune:
+        _status(f"Replay pruned legacy rows | kept={k_prune} dropped={d_prune} | {replay_path}")
+
+    for iter_idx in tqdm(range(1, n_iter + 1), desc="Iterative RL training"):
+        _status(f"[{iter_idx}/{n_iter}] self-play | checkpoint: {current_best_model or '(none)'}")
         iter_data_path = str(data_dir / f"self_play_iter_{iter_idx}.jsonl")
         self_play_summary = generate_self_play_dataset(
             output_path=iter_data_path,
@@ -282,8 +440,14 @@ def run_iterative_rl_training(
             initial_stack=initial_stack,
             small_blind_amount=small_blind_amount,
             value_model_path=current_best_model,
+            rollout_depth=rollout_depth,
         )
         appended = _append_jsonl_records(iter_data_path, replay_path)
+        _status(
+            f"[{iter_idx}/{n_iter}] self-play done | samples_iter={int(self_play_summary['rows_written'])} | "
+            f"mean_y_chip={self_play_summary['mean_training_target']:.4f} | "
+            f"mean_sparse_r={self_play_summary['mean_reward']:.3f} | appended_to_replay={appended}"
+        )
 
         candidate_model_path = str(models_dir / f"value_model_iter_{iter_idx}.json")
         candidate_loss_path = str(models_dir / f"loss_history_iter_{iter_idx}.json")
@@ -296,6 +460,15 @@ def run_iterative_rl_training(
             epochs=epochs_per_iter,
             lr=learning_rate,
             warm_start_path=current_best_model,
+            model_kind=value_model_kind,
+            hidden_dim=mlp_hidden_dim,
+            regression_target=regression_target,
+            rollout_depth=rollout_depth,
+        )
+        ws = bool(train_summary.get("warm_started", 0.0))
+        _status(
+            f"[{iter_idx}/{n_iter}] fit done | final_loss={train_summary['final_loss']:.4f} | "
+            f"warm_start_ok={ws} | out={candidate_model_path}"
         )
 
         baseline_results = evaluate_model_against_baselines(
@@ -323,8 +496,21 @@ def run_iterative_rl_training(
             prev_score = float("-inf")
 
         accepted_as_best = (not current_best_model) or (aggregate_score >= prev_score)
+        submission_export: Dict[str, str] = {}
         if accepted_as_best:
             current_best_model = candidate_model_path
+            submission_export = export_best_model_for_submission(current_best_model, models_dir)
+            if submission_export:
+                _status(
+                    f"[{iter_idx}/{n_iter}] submission checkpoint -> {submission_export.get('standard', '')}"
+                )
+
+        prev_s = prev_score if prev_score != float("-inf") else None
+        prev_part = f"{prev_s:.1f}" if prev_s is not None else "—"
+        _status(
+            f"[{iter_idx}/{n_iter}] eval | agg_stack_delta={aggregate_score:.1f} (prev_best={prev_part}) | "
+            f"accepted={accepted_as_best} | best={current_best_model or '(none)'}"
+        )
 
         iter_summary: Dict[str, object] = {
             "iteration": float(iter_idx),
@@ -337,8 +523,15 @@ def run_iterative_rl_training(
             "previous_score": float(prev_score) if prev_score != float("-inf") else None,
             "accepted_as_best": bool(accepted_as_best),
             "best_model_after_iteration": current_best_model,
+            "submission_export": submission_export,
         }
         iteration_summaries.append(iter_summary)
+
+    final_submission_export = (
+        export_best_model_for_submission(current_best_model, models_dir) if current_best_model else {}
+    )
+    if final_submission_export:
+        _status(f"Submission value model (run best) -> {final_submission_export.get('standard', '')}")
 
     summary = {
         "learning_method": (
@@ -348,35 +541,67 @@ def run_iterative_rl_training(
             "evaluate vs fixed baselines (random, untrained MCTS, previous checkpoint), "
             "and keep the best checkpoint by aggregate stack-delta score."
         ),
+        "run_directory": str(root.resolve()),
         "iterations": float(len(iteration_summaries)),
         "best_model_path": current_best_model,
+        "submission_value_model_export": final_submission_export,
         "history": iteration_summaries,
     }
     summary_path = metrics_dir / "iterative_rl_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _status(f"RL finished | best_model={summary['best_model_path']} | metrics={summary_path}")
     return summary
 
 
 def _parse_args():
     parser = ArgumentParser()
-    parser.add_argument("--output", type=str, default="offline_learning/data/self_play.jsonl")
+    parser.add_argument("--output", type=str, default=_DEFAULT_SELF_PLAY_JSONL)
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--rounds", type=int, default=50)
     parser.add_argument("--sims", type=int, default=250)
     parser.add_argument("--iterative", action="store_true")
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--eval-games", type=int, default=30)
-    parser.add_argument("--output-dir", type=str, default="offline_learning")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="offline_learning",
+        help="Root for iterative RL (data/models/metrics). With --run-name, uses <output-dir>/runs/<name>/.",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default="",
+        help="Optional label; writes under <output-dir>/runs/<run-name>/ so parallel runs stay separate.",
+    )
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument(
+        "--value-model",
+        type=str,
+        choices=("linear", "mlp"),
+        default="linear",
+        help="Architecture for iterative training checkpoints (MCTS loads JSON kind automatically).",
+    )
+    parser.add_argument("--mlp-hidden-dim", type=int, default=32)
+    parser.add_argument(
+        "--regression-target",
+        type=str,
+        choices=("chips", "rollout"),
+        default="rollout",
+        help="Supervision: per-decision chip outcome (chips) or MCTS leaf heuristic (rollout).",
+    )
+    parser.add_argument("--rollout-depth", type=int, default=8)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
+    run_root = resolve_run_directory(args.output_dir, args.run_name)
     if args.iterative:
+        _status(f"Run directory: {run_root}")
         summary = run_iterative_rl_training(
-            output_dir=args.output_dir,
+            output_dir=str(run_root),
             iterations=args.iterations,
             self_play_games=args.games,
             eval_games=args.eval_games,
@@ -384,14 +609,29 @@ if __name__ == "__main__":
             simulations=args.sims,
             epochs_per_iter=args.epochs,
             learning_rate=args.lr,
+            value_model_kind=args.value_model,
+            mlp_hidden_dim=args.mlp_hidden_dim,
+            regression_target=args.regression_target,
+            rollout_depth=args.rollout_depth,
+            initial_stack=args.initial_stack,
+            small_blind_amount=args.small_blind_amount,
         )
         print("Iterative RL summary:", summary)
     else:
+        out_path = args.output
+        if args.run_name.strip() and out_path == _DEFAULT_SELF_PLAY_JSONL:
+            out_path = str(run_root / "data" / "self_play.jsonl")
+        _status(f"Self-play | games={args.games} | out={out_path} | run_dir={run_root}")
         summary = generate_self_play_dataset(
-            output_path=args.output,
+            output_path=out_path,
             num_games=args.games,
             rounds_per_game=args.rounds,
             simulations=args.sims,
+            rollout_depth=args.rollout_depth,
+        )
+        _status(
+            f"Self-play done | rows={int(summary['rows_written'])} | "
+            f"mean_y_chip={summary['mean_training_target']:.4f} | mean_sparse_r={summary['mean_reward']:.3f}"
         )
         print("Self-play summary:", summary)
 

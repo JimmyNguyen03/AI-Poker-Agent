@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pypokerengine.players import BasePokerPlayer
 
 from mcts.belief import OpponentBeliefModel
@@ -13,17 +15,19 @@ class MCTSPlayer(BasePokerPlayer):
         simulations: int = 250,
         exploration: float = 1.4,
         value_model_path: str = "",
+        rollout_depth: int = 8,
     ):
         super().__init__()
         self.simulations = simulations
         self.exploration = exploration
+        self.rollout_depth = rollout_depth
         self.last_search_info = {}
         self._belief_model = OpponentBeliefModel()
         self._value_model = None
         if value_model_path:
-            from offline_learning.value_model import LinearValueModel
+            from offline_learning.value_model import load_value_model
 
-            self._value_model = LinearValueModel.load(value_model_path)
+            self._value_model = load_value_model(value_model_path)
 
     def declare_action(self, valid_actions, hole_card, round_state):
         # Build root state from callback payload.
@@ -40,7 +44,7 @@ class MCTSPlayer(BasePokerPlayer):
             root_state=state,
             num_simulations=self.simulations,
             exploration=self.exploration,
-            rollout_depth=8,
+            rollout_depth=self.rollout_depth,
             value_estimator=self._estimate_value if self._value_model is not None else None,
         )
         self.last_search_info = diagnostics
@@ -73,5 +77,12 @@ class MCTSPlayer(BasePokerPlayer):
 
 
 def setup_ai():
+    """
+    Competition / harness entry: no-arg factory.
+    Ship a checkpoint next to the repo layout below; if missing, MCTS runs without a learned value head.
+    """
+    submission = Path(__file__).resolve().parent / "offline_learning" / "models" / "submission_value_model.json"
+    if submission.is_file():
+        return MCTSPlayer(value_model_path=str(submission.resolve()))
     return MCTSPlayer()
 

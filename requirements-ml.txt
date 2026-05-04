@@ -1,0 +1,2 @@
+# Optional: value MLP training / inference (offline_learning/mlp_value_model.py)
+torch>=2.0.0
