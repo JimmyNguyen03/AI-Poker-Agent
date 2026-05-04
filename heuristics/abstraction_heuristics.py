@@ -2,9 +2,9 @@ from __future__ import annotations
 from pypokerengine.engine.card import Card
 from pypokerengine.engine.hand_evaluator import HandEvaluator
 from pypokerengine.utils.card_utils import estimate_hole_card_win_rate, gen_cards
-from collections import Counter
 from typing import Any, Optional
-import hand_features as hf
+
+from . import hand_features as hf
 
 # Initialize the CutoffAbstraction data bundle object
 def build_cutoff_abstraction(
@@ -48,7 +48,9 @@ def group_hand_strength(
         win_rate_simulations: Optional[int]) -> hf.HandStrengthGroup:
     
     hole, community = _to_cards(hole_card), _to_cards(list(round_state.get("community_card", [])))
-    default_win_rate = {"preflop": 120, "flop": 90, "turn": 70, "river": 50,}.get(str(round_state.get("street")))
+    default_win_rate = {"preflop": 120, "flop": 90, "turn": 70, "river": 50, "showdown": 50}.get(
+        str(round_state.get("street", "preflop")), 50
+    )
     win_rate = estimate_hole_card_win_rate(win_rate_simulations or default_win_rate, 2, hole, community)
     group_strength = next((g for t, g in [(0.80,5),(0.65,4),(0.50,3),(0.35,2)] if win_rate >= t), 1)
     hand = HandEvaluator.gen_hand_rank_info(hole, community)["hand"]["strength"]

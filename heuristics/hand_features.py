@@ -35,6 +35,9 @@ FEATURE_WEIGHTS: dict[str, float] = {
     "bias": 0,
 }
 
+# Fixed order for vectorized value model training (excludes bias; added at predict time in LinearCutoffEvaluator).
+MODEL_FEATURE_KEYS: tuple[str, ...] = tuple(k for k in FEATURE_WEIGHTS if k != "bias")
+
 class HandStrengthGroup:
     def __init__(self, group_strength: int, hand: str, hand_score: int, win_rate: float):
         self.group_strength = group_strength

@@ -12,6 +12,25 @@ if str(ROOT) not in sys.path:
 from offline_learning.value_model import LinearValueModel
 
 
+def _model_for_training(input_dim: int, warm_start_path: str) -> Tuple[LinearValueModel, bool, bool]:
+    """
+    Build initial weights: load checkpoint if path exists and feature dim matches, else zeros.
+    Returns (model, warm_started, dim_mismatch_after_load_attempt).
+    """
+    if not warm_start_path.strip():
+        return LinearValueModel.zeros(input_dim), False, False
+    path = Path(warm_start_path)
+    if not path.is_file():
+        return LinearValueModel.zeros(input_dim), False, False
+    try:
+        loaded = LinearValueModel.load(str(path))
+    except (json.JSONDecodeError, KeyError, OSError, ValueError):
+        return LinearValueModel.zeros(input_dim), False, False
+    if len(loaded.weights) != input_dim:
+        return LinearValueModel.zeros(input_dim), False, True
+    return loaded, True, False
+
+
 def _load_records(path: str) -> List[Tuple[List[float], float]]:
     rows: List[Tuple[List[float], float]] = []
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
@@ -50,20 +69,34 @@ def train_value_model(
     loss_plot_path: str,
     epochs: int = 5,
     lr: float = 0.01,
+    warm_start_path: str = "",
 ) -> Dict[str, float]:
     rows = _load_records(dataset_path)
     if not rows:
         raise ValueError("Dataset is empty. Generate self-play data first.")
-    model = LinearValueModel.zeros(input_dim=len(rows[0][0]))
+    input_dim = len(rows[0][0])
+    model, warm_started, dim_mismatch = _model_for_training(input_dim, warm_start_path)
     loss_history = model.train(rows, epochs=epochs, lr=lr)
     model.save(output_model_path)
 
-    history_payload = {"epochs": len(loss_history), "learning_rate": lr, "loss_history": loss_history}
+    history_payload = {
+        "epochs": len(loss_history),
+        "learning_rate": lr,
+        "loss_history": loss_history,
+        "warm_started": warm_started,
+        "warm_start_path": warm_start_path or "",
+        "warm_start_dim_mismatch": dim_mismatch,
+    }
     history_target = Path(loss_history_path)
     history_target.parent.mkdir(parents=True, exist_ok=True)
     history_target.write_text(json.dumps(history_payload, indent=2), encoding="utf-8")
     _plot_loss_curve(loss_history, loss_plot_path)
-    return {"final_loss": float(loss_history[-1]), "epochs": float(len(loss_history))}
+    return {
+        "final_loss": float(loss_history[-1]),
+        "epochs": float(len(loss_history)),
+        "warm_started": 1.0 if warm_started else 0.0,
+        "warm_start_dim_mismatch": 1.0 if dim_mismatch else 0.0,
+    }
 
 
 def _parse_args():
@@ -74,6 +107,12 @@ def _parse_args():
     parser.add_argument("--out-loss-plot", type=str, default="offline_learning/models/loss_curve.png")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument(
+        "--warm-start",
+        type=str,
+        default="",
+        help="Optional path to value_model.json to initialize weights (same feature dim as dataset).",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +125,7 @@ if __name__ == "__main__":
         loss_plot_path=args.out_loss_plot,
         epochs=args.epochs,
         lr=args.lr,
+        warm_start_path=args.warm_start,
     )
     print("Saved model:", args.out_model)
     print("Saved loss history:", args.out_loss_history)
