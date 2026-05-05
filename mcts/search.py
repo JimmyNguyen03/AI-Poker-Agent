@@ -37,28 +37,49 @@ def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
     idx = street_order.index(state.street) if state.street in street_order else 0
     inc = _limit_raise_increment_chips(sb, state.street)
 
+    # Use real engine amounts when available; fall back to fixed-limit heuristic.
+    call_cost = state.actual_call_amount if state.actual_call_amount > 0 else max(1, inc // 2)
+    raise_cost = state.actual_raise_amount if state.actual_raise_amount > 0 else (inc if inc else 2 * sb)
+
+    # Child amounts reset to 0 (heuristic) unless propagated below.
+    next_call_amount = 0
+    next_raise_amount = 0
+
     if action == "fold":
-        # Folding loses current investment opportunity.
-        hero_stack = max(0, hero_stack - sb)
+        if state.hero_is_next:
+            # Hero folds: no additional deduction (chips already committed are in pot_main).
+            pass
+        else:
+            # Opponent folds: hero collects the pot.
+            hero_stack = hero_stack + pot
+            pot = 0
         street = "showdown"
         community = _board_prefix_for_street(state.round_state_raw, street)
     elif action == "call":
-        # Symmetric toy model: call costs half a min-raise increment each (matches prior sb vs 2*sb split).
-        pay = max(1, inc // 2) if inc else sb
-        hero_stack = max(0, hero_stack - pay)
-        opp_stack = max(0, opp_stack - pay)
-        pot += 2 * pay
+        # Asymmetric: only the acting player pays the call cost.
+        if state.hero_is_next:
+            hero_stack = max(0, hero_stack - call_cost)
+        else:
+            opp_stack = max(0, opp_stack - call_cost)
+        pot += call_cost
         street = street_order[min(idx + 1, len(street_order) - 1)]
         community = _board_prefix_for_street(state.round_state_raw, street)
+        # Street advances: revert to heuristic amounts for the new street.
     else:  # raise
-        pay = inc if inc else 2 * sb
-        hero_stack = max(0, hero_stack - pay)
-        opp_stack = max(0, opp_stack - pay)
-        pot += 2 * pay
+        # Asymmetric: only the acting player commits the raise amount.
+        if state.hero_is_next:
+            hero_stack = max(0, hero_stack - raise_cost)
+        else:
+            opp_stack = max(0, opp_stack - raise_cost)
+        pot += raise_cost
         street = street_order[min(idx + 1, len(street_order) - 1)]
         community = _board_prefix_for_street(state.round_state_raw, street)
+        # Opponent now faces raise_cost as their call; cap re-raise at effective stack.
+        next_call_amount = raise_cost
+        next_raise_amount = min(raise_cost * 2, max(hero_stack, opp_stack))
 
     next_legal = ("fold", "call", "raise") if street != "showdown" else tuple()
+    hero_folded = (action == "fold" and state.hero_is_next)
     return PokerState(
         hero_uuid=state.hero_uuid,
         hole_card=state.hole_card,
@@ -76,22 +97,46 @@ def _apply_heuristic_transition(state: PokerState, action: str) -> PokerState:
         opp_raise_rate=state.opp_raise_rate,
         opp_strength_estimate=state.opp_strength_estimate,
         round_state_raw=state.round_state_raw,
+        actual_call_amount=next_call_amount,
+        actual_raise_amount=next_raise_amount,
+        hero_folded=hero_folded,
     )
 
 
 def _rollout_value(state: PokerState) -> float:
-    """Simple value estimate in [-1, 1], from hero perspective."""
+    """
+    Value estimate in [-1, 1], from hero perspective.
+
+    Incorporates hero's MC win probability so rollouts are card-aware:
+    AA returns a clearly positive value, 72o a clearly negative one.
+    This is the signal the value model (and pure-rollout MCTS) trains on.
+    """
+    if state.hole_card:
+        from mcts.features import _hand_strength, _COMMUNITY_STREET
+        wr_street = _COMMUNITY_STREET.get(len(state.community_card), "preflop")
+        win_rate, _, _ = _hand_strength(state.hole_card, state.community_card, wr_street)
+        hand_advantage = 2.0 * win_rate - 1.0
+    else:
+        hand_advantage = 0.0
+
     if state.street == "showdown":
-        if state.hero_stack > state.opp_stack:
+        # Opp folded: pot was set to 0 by _apply_heuristic_transition.
+        if state.pot_main == 0:
             return 1.0
-        if state.hero_stack < state.opp_stack:
-            return -1.0
-        return 0.0
+        # Hero folded: hero gave up the hand — neutral outcome (saved remaining chips
+        # but lost pot equity). Using 0.0 separates this from a winning call-down
+        # (+hand_advantage) so MCTS correctly prefers calling good hands over folding.
+        if state.hero_folded:
+            return 0.0
+        # Called down to abstract showdown — hand strength determines the result.
+        return max(-1.0, min(1.0, hand_advantage))
+
     stack_delta = state.hero_stack - state.opp_stack
     norm = max(state.hero_stack + state.opp_stack, 1)
     base_value = stack_delta / norm
+
     belief_adjustment = 0.35 * (0.5 - state.opp_strength_estimate)
-    return max(-1.0, min(1.0, base_value + belief_adjustment))
+    return max(-1.0, min(1.0, base_value + 0.5 * hand_advantage + belief_adjustment))
 
 
 def _sample_rollout_action(state: PokerState) -> str:
@@ -100,13 +145,23 @@ def _sample_rollout_action(state: PokerState) -> str:
         return legal[0]
 
     if state.hero_is_next:
-        raise_weight = 0.8 + (1.2 * state.opp_fold_rate)
-        call_weight = 1.0 + state.opp_call_rate
-        fold_weight = max(0.15, 1.0 - 0.5 * state.opp_fold_rate)
+        # Use hero's actual hand strength so rollouts are card-aware:
+        # good hands play aggressively, weak hands fold.
+        if state.hole_card:
+            from mcts.features import _hand_strength, _COMMUNITY_STREET
+            wr_street = _COMMUNITY_STREET.get(len(state.community_card), "preflop")
+            win_rate, _, _ = _hand_strength(state.hole_card, state.community_card, wr_street)
+        else:
+            win_rate = 0.5
+        raise_weight = 0.2 + 2.0 * win_rate + 0.5 * state.opp_fold_rate
+        call_weight  = 0.5 + 1.0 * win_rate
+        fold_weight  = max(0.05, 1.5 - 2.0 * win_rate)
     else:
-        raise_weight = 0.8 + (2.0 * state.opp_raise_rate)
-        call_weight = 0.8 + (1.8 * state.opp_call_rate)
-        fold_weight = max(0.15, 0.8 + (2.0 * state.opp_fold_rate))
+        # Keep fold probability proportional to observed rate so rollouts reflect
+        # the actual opponent (e.g. RaisedPlayer never folds → ~3% in rollout).
+        raise_weight = 0.5 + 2.5 * state.opp_raise_rate
+        call_weight  = 0.5 + 2.0 * state.opp_call_rate
+        fold_weight  = max(0.05, 0.1 + 2.5 * state.opp_fold_rate)
 
     weights = []
     for action in legal:
@@ -125,13 +180,16 @@ def _simulate_from(
     value_estimator: Optional[Callable[[PokerState], float]] = None,
 ) -> float:
     state = node.state
+    if state.is_terminal():
+        return _rollout_value(state)
+    if value_estimator is not None:
+        return max(-1.0, min(1.0, float(value_estimator(state))))
+    # Pure rollout fallback (no value estimator).
     depth = 0
     while not state.is_terminal() and depth < rollout_depth and state.legal_actions:
         action = _sample_rollout_action(state)
         state = _apply_heuristic_transition(state, action)
         depth += 1
-    if value_estimator is not None and not state.is_terminal():
-        return max(-1.0, min(1.0, float(value_estimator(state))))
     return _rollout_value(state)
 
 

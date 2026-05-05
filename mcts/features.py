@@ -1,9 +1,8 @@
 """
-Convert a PokerState to a flat feature dict for the linear value model.
+Convert a PokerState to a flat feature dict for the value model.
 
-Uses MC win-rate from the heuristics module so the model can distinguish
-strong hands from weak ones. Results are cached by (hole_card, community_card,
-street) so the expensive MC call fires at most once per street per round.
+Kept in mcts/ so the tournament runtime only needs mcts/, heuristics/, and
+pypokerengine/ — no dependency on the offline_learning training package.
 """
 
 from __future__ import annotations
@@ -12,11 +11,8 @@ from mcts.state import PokerState
 
 _STREET_IDX = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
 
-# More sims reduce MC variance so rollout labels and features use similar estimates.
 _WIN_RATE_SIMS = 50
 
-# Canonical street key per community-card count: ensures features and rollout both
-# hit the same LRU cache entry when they have the same hole + community cards.
 _COMMUNITY_STREET = {0: "preflop", 3: "flop", 4: "turn", 5: "river"}
 
 
@@ -38,12 +34,10 @@ def state_to_features(state: PokerState) -> dict[str, float]:
     total_stack = max(state.hero_stack + state.opp_stack, 1)
     sb = state.small_blind_amount
 
-    # Bet pricing: real engine amounts when available, fixed-limit heuristic otherwise.
     inc = 2 * sb if state.street in ("preflop", "flop") else 4 * sb
     call_amount = state.actual_call_amount if state.actual_call_amount > 0 else max(1, inc // 2)
     raise_amount = state.actual_raise_amount if state.actual_raise_amount > 0 else inc
 
-    # Real hand strength via MC win-rate (cached — at most one MC call per street).
     if state.hole_card:
         wr_street = _COMMUNITY_STREET.get(len(state.community_card), "preflop")
         win_rate, hand_strength_norm, hand_group_norm = _hand_strength(
@@ -55,28 +49,22 @@ def state_to_features(state: PokerState) -> dict[str, float]:
         hand_group_norm = 0.2
 
     return {
-        # Hand strength (the critical missing signal)
         "win_rate": win_rate,
         "hand_strength_norm": hand_strength_norm,
         "hand_group_norm": hand_group_norm,
-        # Bet pricing
         "pot_odds": call_amount / max(state.pot_main + call_amount, 1),
         "call_price_stack_fraction": call_amount / max(state.hero_stack, 1),
         "raise_price_stack_fraction": raise_amount / max(state.hero_stack, 1),
-        # Chip position
         "stack_advantage": (state.hero_stack - state.opp_stack) / total_stack,
         "hero_stack_ratio": state.hero_stack / total_stack,
-        # Game progression
         "street_progress": street_idx / 4.0,
         "street_is_preflop": float(state.street == "preflop"),
         "street_is_flop": float(state.street == "flop"),
         "street_is_turn": float(state.street == "turn"),
         "street_is_river": float(state.street == "river"),
-        # Opponent beliefs
         "opp_raise_rate": state.opp_raise_rate,
         "opp_fold_rate": state.opp_fold_rate,
         "opp_call_rate": state.opp_call_rate,
         "opp_aggression": state.opp_raise_rate - state.opp_fold_rate,
-        # Positional
         "hero_is_next": float(state.hero_is_next),
     }

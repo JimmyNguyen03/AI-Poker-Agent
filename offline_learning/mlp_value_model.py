@@ -1,125 +1,140 @@
-"""Small value MLP: input → ReLU hidden → scalar (PyTorch + Adam)."""
+"""
+MLP value model: 18 → ReLU(32) → ReLU(16) → clip(1).
+
+Pure numpy; no external ML library required.
+Implements the same predict / update / save / load interface as ValueModel.
+"""
 
 from __future__ import annotations
-
 import json
-import os
+import numpy as np
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# Windows: PyTorch + NumPy/MKL often load two OpenMP runtimes; avoid abort on import.
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+from offline_learning.value_model import FEATURE_KEYS, features_to_vector
 
-import torch
-import torch.nn as nn
-
-from offline_learning.value_model import _clip
-
-
-def _build_net(input_dim: int, hidden_dim: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Linear(input_dim, hidden_dim),
-        nn.ReLU(),
-        nn.Linear(hidden_dim, 1),
-    )
+_PARAM_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
+_WEIGHT_NAMES = ("W1", "W2", "W3")  # biases excluded from L2
 
 
 class MLPValueModel:
-    """
-    Clipped value in [-1, 1] at inference; trained with MSE on raw logits (batch Adam per epoch).
-    """
+    """Two-hidden-layer MLP trained with Adam on MSE."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, net: Optional[nn.Sequential] = None):
-        self.input_dim = int(input_dim)
-        self.hidden_dim = int(hidden_dim)
-        self.net = net if net is not None else _build_net(input_dim, hidden_dim)
+    def __init__(self, hidden: tuple[int, int] = (32, 16), seed: int = 42):
+        self._hidden = hidden
+        D = len(FEATURE_KEYS)
+        H1, H2 = hidden
+        rng = np.random.default_rng(seed)
+
+        # He initialisation (appropriate for ReLU activations).
+        self.W1 = rng.normal(0.0, np.sqrt(2.0 / D),  (H1, D)).astype(np.float64)
+        self.b1 = np.zeros(H1, dtype=np.float64)
+        self.W2 = rng.normal(0.0, np.sqrt(2.0 / H1), (H2, H1)).astype(np.float64)
+        self.b2 = np.zeros(H2, dtype=np.float64)
+        self.W3 = rng.normal(0.0, np.sqrt(2.0 / H2), (1,  H2)).astype(np.float64)
+        self.b3 = np.zeros(1, dtype=np.float64)
+
+        self._init_adam()
+
+    def _init_adam(self) -> None:
+        self._t = 0
+        self._m = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
+        self._v = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def predict(self, features: dict) -> float:
+        x = features_to_vector(features)
+        _, _, _, _, z3 = self._forward(x)
+        return float(np.clip(z3, -1.0, 1.0))
+
+    def update(self, features: dict, target: float, lr: float) -> float:
+        """One Adam step on MSE (with gradient clipping + L2 reg). Returns squared error."""
+        _BETA1, _BETA2, _EPS, _WD, _CLIP = 0.9, 0.999, 1e-8, 1e-4, 1.0
+
+        x = features_to_vector(features)
+        z1, h1, z2, h2, z3 = self._forward(x)
+        pred = float(np.clip(z3, -1.0, 1.0))
+        error = pred - target
+
+        # Backprop
+        clip_gate = 1.0 if -1.0 < z3 < 1.0 else 0.0
+        dz3 = 2.0 * error * clip_gate                  # scalar
+
+        dW3 = dz3 * h2[np.newaxis, :]                  # (1, H2)
+        db3 = np.array([dz3])                           # (1,)
+        dh2 = self.W3[0] * dz3                          # (H2,)
+
+        dz2 = dh2 * (z2 > 0.0)                         # (H2,) ReLU gate
+        dW2 = np.outer(dz2, h1)                        # (H2, H1)
+        db2 = dz2
+        dh1 = self.W2.T @ dz2                          # (H1,)
+
+        dz1 = dh1 * (z1 > 0.0)                         # (H1,) ReLU gate
+        dW1 = np.outer(dz1, x)                         # (H1, D)
+        db1 = dz1
+
+        grads = {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2, "W3": dW3, "b3": db3}
+
+        # L2 regularization on weights only
+        for p in _WEIGHT_NAMES:
+            grads[p] = grads[p] + _WD * getattr(self, p)
+
+        # Gradient clipping (global norm)
+        total_norm = np.sqrt(sum(float(np.sum(g ** 2)) for g in grads.values()))
+        if total_norm > _CLIP:
+            scale = _CLIP / total_norm
+            grads = {p: g * scale for p, g in grads.items()}
+
+        # Adam update
+        self._t += 1
+        t = self._t
+        for p, g in grads.items():
+            self._m[p] = _BETA1 * self._m[p] + (1.0 - _BETA1) * g
+            self._v[p] = _BETA2 * self._v[p] + (1.0 - _BETA2) * g ** 2
+            m_hat = self._m[p] / (1.0 - _BETA1 ** t)
+            v_hat = self._v[p] / (1.0 - _BETA2 ** t)
+            param = getattr(self, p)
+            param -= lr * m_hat / (np.sqrt(v_hat) + _EPS)
+
+        return error * error
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({
+                "model_type": "mlp",
+                "hidden": list(self._hidden),
+                "W1": self.W1.tolist(), "b1": self.b1.tolist(),
+                "W2": self.W2.tolist(), "b2": self.b2.tolist(),
+                "W3": self.W3.tolist(), "b3": self.b3.tolist(),
+            }, f)
 
     @classmethod
-    def zeros(cls, input_dim: int, hidden_dim: int = 32, seed: Optional[int] = None) -> MLPValueModel:
-        if seed is not None:
-            torch.manual_seed(seed)
-        m = cls(input_dim, hidden_dim)
-        for mod in m.net.modules():
-            if isinstance(mod, nn.Linear):
-                nn.init.kaiming_uniform_(mod.weight, nonlinearity="relu")
-                nn.init.zeros_(mod.bias)
+    def load(cls, path: str | Path) -> MLPValueModel:
+        with open(path, "r") as f:
+            d = json.load(f)
+        m = cls(hidden=tuple(d["hidden"]))
+        m.W1 = np.array(d["W1"]); m.b1 = np.array(d["b1"])
+        m.W2 = np.array(d["W2"]); m.b2 = np.array(d["b2"])
+        m.W3 = np.array(d["W3"]); m.b3 = np.array(d["b3"])
+        m._init_adam()
         return m
 
-    @torch.inference_mode()
-    def predict_raw(self, features: List[float]) -> float:
-        self.net.eval()
-        x = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
-        return float(self.net(x).squeeze())
+    def __repr__(self) -> str:
+        return f"MLPValueModel(hidden={self._hidden})"
 
-    def predict(self, features: List[float]) -> float:
-        return _clip(self.predict_raw(features), -1.0, 1.0)
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
-    def train(self, records: Iterable[Tuple[List[float], float]], epochs: int = 5, lr: float = 0.01) -> List[float]:
-        rows = list(records)
-        if not rows:
-            return []
-        x = torch.as_tensor([r[0] for r in rows], dtype=torch.float32)
-        y = torch.as_tensor([[r[1]] for r in rows], dtype=torch.float32)
-
-        self.net.train()
-        opt = torch.optim.Adam(self.net.parameters(), lr=lr)
-        loss_fn = nn.MSELoss()
-
-        history: List[float] = []
-        for _ in range(max(1, epochs)):
-            opt.zero_grad(set_to_none=True)
-            pred = self.net(x)
-            loss = loss_fn(pred, y)
-            loss.backward()
-            opt.step()
-            history.append(float(loss.detach()))
-
-        self.net.eval()
-        return history
-
-    def to_payload(self) -> Dict[str, Any]:
-        sd = self.net.state_dict()
-        return {
-            "kind": "mlp",
-            "input_dim": self.input_dim,
-            "hidden_dim": self.hidden_dim,
-            "state_dict": {k: v.detach().cpu().tolist() for k, v in sd.items()},
-        }
-
-    def save(self, path: str) -> None:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(self.to_payload(), indent=2), encoding="utf-8")
-
-    @classmethod
-    def from_payload(cls, payload: Dict[str, Any]) -> MLPValueModel:
-        input_dim = int(payload["input_dim"])
-        hidden_dim = int(payload["hidden_dim"])
-        net = _build_net(input_dim, hidden_dim)
-
-        if "state_dict" in payload:
-            tensors = {
-                k: torch.as_tensor(v, dtype=torch.float32) for k, v in payload["state_dict"].items()
-            }
-            net.load_state_dict(tensors)
-        else:
-            # Legacy JSON: W1 [H,D], b1 [H], W2 [H], b2 scalar
-            w1 = torch.as_tensor(payload["W1"], dtype=torch.float32)
-            b1 = torch.as_tensor(payload["b1"], dtype=torch.float32)
-            w2 = torch.as_tensor(payload["W2"], dtype=torch.float32).view(1, -1)
-            b2 = torch.as_tensor([float(payload["b2"])], dtype=torch.float32)
-            net.load_state_dict(
-                {
-                    "0.weight": w1,
-                    "0.bias": b1,
-                    "2.weight": w2,
-                    "2.bias": b2,
-                }
-            )
-
-        return cls(input_dim=input_dim, hidden_dim=hidden_dim, net=net)
-
-    @classmethod
-    def load(cls, path: str) -> MLPValueModel:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls.from_payload(payload)
+    def _forward(self, x: np.ndarray):
+        """Returns (z1, h1, z2, h2, z3_scalar) for use in backprop."""
+        z1 = self.W1 @ x + self.b1
+        h1 = np.maximum(0.0, z1)
+        z2 = self.W2 @ h1 + self.b2
+        h2 = np.maximum(0.0, z2)
+        z3 = float((self.W3 @ h2 + self.b3)[0])
+        return z1, h1, z2, h2, z3

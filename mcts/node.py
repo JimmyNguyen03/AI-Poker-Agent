@@ -30,10 +30,12 @@ class Node:
 
     def best_child_uct(self, exploration: float) -> "Node":
         parent_log = math.log(max(self.visits, 1))
+        # Hero maximizes; opp minimizes hero's value. Use sign to flip exploit term.
+        sign = 1.0 if self.state.hero_is_next else -1.0
         def score(child: "Node") -> float:
             if child.visits == 0:
                 return float("inf")
-            exploit = child.mean_value
+            exploit = sign * child.mean_value
             explore = exploration * math.sqrt(parent_log / child.visits)
             return exploit + explore
         return max(self.children.values(), key=score)
