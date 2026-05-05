@@ -29,12 +29,7 @@ def load_value_model(path: str):
     if model_type == "linear":
         weights = {k: float(v) for k, v in data.items() if k != "model_type"}
         return LinearValueModel(weights)
-    # MLP / transformer: fall back to the full offline_learning loader if available.
-    try:
-        from offline_learning.value_model import load_value_model as _full_load
-        return _full_load(path)
-    except ImportError:
-        raise ValueError(
-            f"Model type '{model_type}' requires offline_learning package. "
-            "Use a linear checkpoint for tournament play."
-        )
+    raise ValueError(
+        f"Model type '{model_type}' is not supported in the tournament runtime. "
+        "Re-save the checkpoint as a linear model."
+    )

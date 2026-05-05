@@ -25,7 +25,7 @@ class MCTSPlayer(BasePokerPlayer):
         self._belief_model = OpponentBeliefModel()
         self._value_model = None
         if value_model_path:
-            from offline_learning.value_model import load_value_model
+            from mcts.value_model import load_value_model
 
             self._value_model = load_value_model(value_model_path)
 
@@ -53,7 +53,7 @@ class MCTSPlayer(BasePokerPlayer):
         return best_action
 
     def _estimate_value(self, state):
-        from offline_learning.features import state_to_features
+        from mcts.features import state_to_features
 
         return self._value_model.predict(state_to_features(state))
 
@@ -81,7 +81,17 @@ def setup_ai():
     Competition / harness entry: no-arg factory.
     Ship a checkpoint next to the repo layout below; if missing, MCTS runs without a learned value head.
     """
-    submission = Path(__file__).resolve().parent / "offline_learning" / "models" / "submission_value_model.json"
+    here = Path(__file__).resolve().parent
+    # In the tournament zip, mcts_player.py lives inside submission/ next to the model.
+    # In the dev repo, submission/ is a sibling directory.
+    for candidate in [
+        here / "submission_value_model.json",                          # zip: submission/
+        here / "submission" / "submission_value_model.json",           # dev repo
+        here / "offline_learning" / "models" / "submission_value_model.json",  # legacy
+    ]:
+        submission = candidate
+        if submission.is_file():
+            break
     if submission.is_file():
         return MCTSPlayer(value_model_path=str(submission.resolve()))
     return MCTSPlayer()

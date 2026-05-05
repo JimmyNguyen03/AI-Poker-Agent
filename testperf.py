@@ -5,6 +5,7 @@ setup_config = game.setup_config
 start_poker = game.start_poker
 import time
 from argparse import ArgumentParser
+import signal
 
 
 """ =========== *Remember to import your agent!!! =========== """

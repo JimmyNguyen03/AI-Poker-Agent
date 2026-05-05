@@ -1,8 +1,8 @@
 """
 Convert a PokerState to a flat feature dict for the value model.
 
-Kept in mcts/ so the tournament runtime only needs mcts/, heuristics/, and
-pypokerengine/ — no dependency on the offline_learning training package.
+Only depends on pypokerengine (whitelisted by the tournament portal) and the
+Python standard library — no heuristics or offline_learning imports needed.
 """
 
 from __future__ import annotations
@@ -15,17 +15,27 @@ _WIN_RATE_SIMS = 50
 
 _COMMUNITY_STREET = {0: "preflop", 3: "flop", 4: "turn", 5: "river"}
 
+_HAND_TO_SCORE = {
+    "HIGHCARD": 0, "ONEPAIR": 1, "TWOPAIR": 2, "THREECARD": 3,
+    "STRAIGHT": 4, "FLASH": 5, "FULLHOUSE": 6, "FOURCARD": 7, "STRAIGHTFLASH": 8,
+}
+
 
 @lru_cache(maxsize=2048)
 def _hand_strength(hole_card: tuple, community_card: tuple, street: str) -> tuple:
     """Return (win_rate, hand_strength_norm, hand_group_norm). Cached by key."""
-    from heuristics.abstraction_heuristics import group_hand_strength
-    g = group_hand_strength(
-        list(hole_card),
-        {"community_card": list(community_card), "street": street},
-        win_rate_simulations=_WIN_RATE_SIMS,
-    )
-    return g.win_rate, g.hand_score / 8.0, g.group_strength / 5.0
+    from pypokerengine.utils.card_utils import estimate_hole_card_win_rate, gen_cards
+    from pypokerengine.engine.hand_evaluator import HandEvaluator
+
+    hole = gen_cards(list(hole_card))
+    community = gen_cards(list(community_card)) if community_card else []
+
+    win_rate = estimate_hole_card_win_rate(_WIN_RATE_SIMS, 2, hole, community)
+    hand_name = HandEvaluator.gen_hand_rank_info(hole, community)["hand"]["strength"]
+    hand_score = _HAND_TO_SCORE.get(hand_name, 0)
+    group_strength = next((g for t, g in [(0.80, 5), (0.65, 4), (0.50, 3), (0.35, 2)] if win_rate >= t), 1)
+
+    return win_rate, hand_score / 8.0, group_strength / 5.0
 
 
 def state_to_features(state: PokerState) -> dict[str, float]:
