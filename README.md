@@ -251,3 +251,17 @@ python offline_learning/benchmark.py --model offline_learning/models/transformer
 | MCTS search, belief model, state abstraction | — |
 | Hand features, abstraction heuristics | — |
 | Offline learning (self-play, linear/MLP/transformer, training loop) | Jackson Michaels |
+
+---
+
+## Team experiments (hyperparameters)
+
+For meeting prep and the final report, log results in `offline_learning/EXPERIMENTS_LOG.md`.
+
+Re-run the same small grid locally:
+
+```bash
+python offline_learning/run_quick_experiments.py
+```
+
+Then scale up training/benchmark sizes as in **Recommended full training run** and **Benchmarking** above (`--games 20`, `--rounds 100`, etc.) for tighter confidence intervals.
