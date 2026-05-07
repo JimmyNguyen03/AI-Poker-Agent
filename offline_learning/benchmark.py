@@ -293,17 +293,26 @@ def _find_all_models(models_dir: Path) -> list[tuple[str, Path]]:
     """
     Scan models_dir for submission_value_model.json files.
     Returns list of (label, path) sorted by label.
-    Checks both the root models/ folder and immediate subdirectories.
+    Checks the root folder, immediate subdirectories, and one level deeper
+    (to handle models/<model>/<target>/submission_value_model.json).
     """
     found: list[tuple[str, Path]] = []
     root_model = models_dir / "submission_value_model.json"
     if root_model.exists():
         found.append(("root", root_model))
     for subdir in sorted(models_dir.iterdir()):
-        if subdir.is_dir():
-            candidate = subdir / "submission_value_model.json"
-            if candidate.exists():
-                found.append((subdir.name, candidate))
+        if not subdir.is_dir():
+            continue
+        candidate = subdir / "submission_value_model.json"
+        if candidate.exists():
+            found.append((subdir.name, candidate))
+        else:
+            # One level deeper: models/<model>/<target>/
+            for subsubdir in sorted(subdir.iterdir()):
+                if subsubdir.is_dir():
+                    candidate2 = subsubdir / "submission_value_model.json"
+                    if candidate2.exists():
+                        found.append((f"{subdir.name}/{subsubdir.name}", candidate2))
     return found
 
 

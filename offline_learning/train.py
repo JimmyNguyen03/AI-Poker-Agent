@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from offline_learning.value_model import ValueModel
+from offline_learning.self_play import _TARGET_MODES
 
 _MODEL_TYPES = ("linear", "mlp", "transformer")
 
@@ -88,6 +89,7 @@ def run_iterative_self_play(
     epochs_per_iter: int = 5,
     lr: float = 0.01,
     output_path: str | None = None,
+    target_mode: str = "rollout",
 ) -> object:
     """
     Main training loop.
@@ -117,6 +119,7 @@ def run_iterative_self_play(
     log: dict = {
         "config": {
             "model_type": model_type,
+            "target_mode": target_mode,
             "iterations": iterations,
             "games_per_iter": games_per_iter,
             "rounds_per_game": rounds_per_game,
@@ -127,7 +130,7 @@ def run_iterative_self_play(
     }
 
     print(
-        f"[{model_type}] Starting iterative self-play: "
+        f"[{model_type}|{target_mode}] Starting iterative self-play: "
         f"{iterations} iters x {games_per_iter} games x {rounds_per_game} rounds"
     )
 
@@ -154,7 +157,8 @@ def run_iterative_self_play(
 
             print(f"  game {g}/{games_per_iter} vs {opp_label}...", end=" ", flush=True)
             episode_data = run_self_play_episode(
-                num_rounds=rounds_per_game, value_model=model, opp_player=opp
+                num_rounds=rounds_per_game, value_model=model, opp_player=opp,
+                target_mode=target_mode,
             )
             all_data.extend(episode_data)
             print(f"{len(episode_data)} examples")
@@ -214,6 +218,16 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="linear",
                         choices=[*_MODEL_TYPES, "all"],
                         help="Model architecture to train. 'all' trains all three to separate subfolders.")
+    parser.add_argument("--target", type=str, default="rollout",
+                        choices=[*_TARGET_MODES, "all"],
+                        help=(
+                            "Training target. "
+                            "'rollout' (default): mean of N abstract rollouts from each child state — "
+                            "card-aware and low-variance. "
+                            "'chip_delta': actual chip change for the round normalised to [-1, 1]. "
+                            "'winner': +1 if hero wins the round's pot, -1 otherwise. "
+                            "'all': train every target mode to separate subfolders."
+                        ))
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--games-per-iter", type=int, default=5)
     parser.add_argument("--rounds-per-game", type=int, default=50)
@@ -223,20 +237,27 @@ if __name__ == "__main__":
         "--output",
         type=str,
         default=str(_ROOT / "offline_learning" / "models" / "submission_value_model.json"),
-        help="Output path. For --model all, each type is saved to a subfolder of this file's parent.",
+        help="Output path. For --model/--target all, each combo is saved to a subfolder.",
     )
     args = parser.parse_args()
 
-    targets = list(_MODEL_TYPES) if args.model == "all" else [args.model]
+    model_targets = list(_MODEL_TYPES) if args.model == "all" else [args.model]
+    train_targets = list(_TARGET_MODES) if args.target == "all" else [args.target]
+    combos = [(m, t) for m in model_targets for t in train_targets]
+    multi = len(combos) > 1
 
-    for model_type in targets:
-        if len(targets) > 1:
-            # Save each model type to its own subfolder.
+    for model_type, target_mode in combos:
+        if multi:
             base_dir = Path(args.output).parent
             fname    = Path(args.output).name
-            out_path = str(base_dir / model_type / fname)
+            # Use subfolders like  models/mlp/chip_delta/submission_value_model.json
+            # or  models/mlp/submission_value_model.json when only one target is swept.
+            if len(train_targets) > 1:
+                out_path = str(base_dir / model_type / target_mode / fname)
+            else:
+                out_path = str(base_dir / model_type / fname)
             print(f"\n{'='*60}")
-            print(f"  Training model: {model_type}  →  {out_path}")
+            print(f"  Training model={model_type}  target={target_mode}  →  {out_path}")
             print(f"{'='*60}")
         else:
             out_path = args.output
@@ -249,6 +270,7 @@ if __name__ == "__main__":
             epochs_per_iter=args.epochs,
             lr=args.lr,
             output_path=out_path,
+            target_mode=target_mode,
         )
 
         if model_type == "linear":

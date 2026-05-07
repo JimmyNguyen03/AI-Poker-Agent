@@ -93,6 +93,8 @@ def plot_training(log_path: str | Path, save_path: str | Path | None = None) -> 
 
     # Config annotation
     config_str = (
+        f"model={cfg.get('model_type','-')}  "
+        f"target={cfg.get('target_mode','-')}  "
         f"iters={cfg.get('iterations','-')}  "
         f"games/iter={cfg.get('games_per_iter','-')}  "
         f"rounds/game={cfg.get('rounds_per_game','-')}  "
@@ -118,19 +120,26 @@ def plot_training(log_path: str | Path, save_path: str | Path | None = None) -> 
 
 def _find_all_logs(models_dir: Path) -> list[tuple[str, Path]]:
     """
-    Scan models_dir for training_log.json files.
-    Returns list of (label, path) sorted by label.
-    Checks both the root models/ folder and immediate subdirectories.
+    Scan models_dir for training_log.json files up to two levels deep.
+    Handles both models/<model>/training_log.json and
+    models/<model>/<target>/training_log.json layouts.
     """
     found: list[tuple[str, Path]] = []
     root_log = models_dir / "training_log.json"
     if root_log.exists():
         found.append(("root", root_log))
     for subdir in sorted(models_dir.iterdir()):
-        if subdir.is_dir():
-            candidate = subdir / "training_log.json"
-            if candidate.exists():
-                found.append((subdir.name, candidate))
+        if not subdir.is_dir():
+            continue
+        candidate = subdir / "training_log.json"
+        if candidate.exists():
+            found.append((subdir.name, candidate))
+        else:
+            for subsubdir in sorted(subdir.iterdir()):
+                if subsubdir.is_dir():
+                    candidate2 = subsubdir / "training_log.json"
+                    if candidate2.exists():
+                        found.append((f"{subdir.name}/{subsubdir.name}", candidate2))
     return found
 
 
@@ -215,5 +224,9 @@ if __name__ == "__main__":
 
     if args.all:
         plot_all_training()
-    else:
+    elif Path(args.log).exists():
         plot_training(args.log, args.save)
+    else:
+        # Root log not found — fall back to plotting all discovered logs.
+        print(f"[plot_training] No log at {args.log} — scanning for all logs.")
+        plot_all_training()
