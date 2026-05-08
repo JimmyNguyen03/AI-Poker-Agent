@@ -25,7 +25,6 @@ FEATURE_WEIGHTS: dict[str, float] = {
     "pot_odds": 0.40,
     "call_price_stack_fraction": -0.55,
     "raise_price_stack_fraction": -0.25,
-    "hero_stack_ratio": 0.35,
     "stack_advantage": 0.55,
     "in_position": 0.15,
     "street_progress": 0.10,
@@ -33,9 +32,16 @@ FEATURE_WEIGHTS: dict[str, float] = {
     "opp_raise_rate": -0.20,
     "opp_aggression": -0.20,
     "bias": 0,
+    "hero_stack_ratio": 0.35,
+
+    ### 
+    "is_check": 0.05,
+    "is_facing_bet": -0.10,
+    "call_is_blind_completion": 0.05,
+    "raise_stage_norm": -0.12,
+    "betting_capped": -0.05,
 }
 
-# Fixed order for vectorized value model training (excludes bias; added at predict time in LinearCutoffEvaluator).
 MODEL_FEATURE_KEYS: tuple[str, ...] = tuple(k for k in FEATURE_WEIGHTS if k != "bias")
 
 class HandStrengthGroup:
@@ -44,25 +50,31 @@ class HandStrengthGroup:
         self.hand = hand
         self.hand_score = hand_score
         self.win_rate = win_rate
-        
+
 class BetSizeGroup:
-    def __init__(self, action: str, amount: int, bet_size_group: int,
-                 amount_over_pot: float, amount_over_stack: float):
+    def __init__(self, action: str, amount: int, bet_size_group: int, amount_over_pot: float,
+        amount_over_stack: float, is_facing_bet: float = 0.0, raise_stage_norm: float = 0.0,
+        betting_capped: float = 0.0):
         self.action = action
         self.amount = amount
         self.bet_size_group = bet_size_group
         self.amount_over_pot = amount_over_pot
         self.amount_over_stack = amount_over_stack
         
+        ### 
+        self.is_facing_bet = is_facing_bet
+        self.raise_stage_norm = raise_stage_norm
+        self.betting_capped = betting_capped
+
 class CutoffAbstraction:
-    def __init__(self,hand_group: HandStrengthGroup, call_group: BetSizeGroup,
+    def __init__(self, hand_group: HandStrengthGroup, call_group: BetSizeGroup, 
                  raise_group: BetSizeGroup, features: dict[str, float], heuristic_value: float):
         self.hand_group = hand_group
         self.call_group = call_group
         self.raise_group = raise_group
         self.features = features
         self.heuristic_value = heuristic_value
-        
+
 class LinearCutoffEvaluator:
     def __init__(self, weights: Optional[dict[str, float]]):
         self.weights = dict(FEATURE_WEIGHTS)
