@@ -37,24 +37,46 @@ from pypokerengine.api.game import setup_config, start_poker
 
 
 # ------------------------------------------------------------------
-# Single game runner
+# Picklable worker — must be at module level for multiprocessing spawn
 # ------------------------------------------------------------------
 
-def _run_one_game(
-    hero_factory,
-    opp_factory,
-    num_rounds: int,
-    initial_stack: int,
-    small_blind: int,
-    hero_is_first: bool,
-) -> dict:
+def _bench_worker(args: tuple) -> dict:
     """
-    Play one game and return a result dict.
-    hero_factory / opp_factory are zero-arg callables that produce fresh players.
-    hero_is_first controls registration order (affects small-blind position).
+    Run one benchmark game in a subprocess.
+
+    args = (model_path, simulations, opp_spec, num_rounds, initial_stack, small_blind, hero_is_first)
+      model_path — path to value model JSON (or None for untrained hero)
+      opp_spec   — "random" | "raised" | "mcts_no_vm"
     """
-    hero = hero_factory()
-    opp = opp_factory()
+    model_path, simulations, opp_spec, num_rounds, initial_stack, small_blind, hero_is_first = args
+
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+
+    # Re-apply SIGALRM patch in spawned workers (module-level code re-runs on import).
+    if not hasattr(signal, "SIGALRM"):
+        import pypokerengine.api.game as _gapi
+        def _noop(*_a, **_kw):
+            return lambda fn: fn
+        _gapi.timeout2 = _noop
+
+    from pypokerengine.api.game import setup_config, start_poker
+    from mcts_player import MCTSPlayer
+
+    hero = MCTSPlayer(simulations=simulations, value_model_path=model_path)
+
+    if opp_spec == "random":
+        from randomplayer import RandomPlayer
+        opp = RandomPlayer()
+    elif opp_spec == "raised":
+        from raise_player import RaisedPlayer
+        opp = RaisedPlayer()
+    elif opp_spec == "rules":
+        from offline_learning.rules_player import RulesBasedPlayer
+        opp = RulesBasedPlayer()
+    else:  # "mcts_no_vm"
+        opp = MCTSPlayer(simulations=simulations)
 
     config = setup_config(
         max_round=num_rounds,
@@ -63,22 +85,19 @@ def _run_one_game(
     )
     if hero_is_first:
         config.register_player(name="hero", algorithm=hero)
-        config.register_player(name="opp", algorithm=opp)
+        config.register_player(name="opp",  algorithm=opp)
     else:
-        config.register_player(name="opp", algorithm=opp)
+        config.register_player(name="opp",  algorithm=opp)
         config.register_player(name="hero", algorithm=hero)
 
     result = start_poker(config, verbose=0)
-
     hero_stack = next(p["stack"] for p in result["players"] if p["name"] == "hero")
-    opp_stack = next(p["stack"] for p in result["players"] if p["name"] == "opp")
-    chip_delta = hero_stack - initial_stack
-
+    opp_stack  = next(p["stack"] for p in result["players"] if p["name"] == "opp")
     return {
         "hero_stack": hero_stack,
-        "opp_stack": opp_stack,
-        "chip_delta": chip_delta,
-        "hero_won": hero_stack > opp_stack,
+        "opp_stack":  opp_stack,
+        "chip_delta": hero_stack - initial_stack,
+        "hero_won":   hero_stack > opp_stack,
     }
 
 
@@ -87,33 +106,51 @@ def _run_one_game(
 # ------------------------------------------------------------------
 
 def benchmark_vs(
-    hero_factory,
-    opp_factory,
+    model_path: str | None,
+    simulations: int,
+    opp_spec: str,
     opp_label: str,
     n_games: int = 10,
     num_rounds: int = 50,
     initial_stack: int = 1000,
     small_blind: int = 10,
+    n_workers: int = 1,
 ) -> dict:
-    """Run n_games and return aggregate statistics."""
+    """
+    Run n_games against opp_spec opponent and return aggregate statistics.
+
+    opp_spec: "random" | "raised" | "mcts_no_vm"
+    Uses ProcessPoolExecutor when n_workers > 1.
+    """
     print(f"\n  vs {opp_label}: ", end="", flush=True)
+
+    worker_args = [
+        (model_path, simulations, opp_spec, num_rounds, initial_stack, small_blind, g % 2 == 0)
+        for g in range(n_games)
+    ]
+
+    if n_workers > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        print(f"(parallel, workers={n_workers}) ", end="", flush=True)
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            game_results = list(executor.map(_bench_worker, worker_args))
+    else:
+        game_results = []
+        for wargs in worker_args:
+            res = _bench_worker(wargs)
+            game_results.append(res)
+            print("W" if res["hero_won"] else "L", end="", flush=True)
 
     chip_deltas: list[float] = []
     wins = 0
-
-    for g in range(n_games):
-        res = _run_one_game(
-            hero_factory=hero_factory,
-            opp_factory=opp_factory,
-            num_rounds=num_rounds,
-            initial_stack=initial_stack,
-            small_blind=small_blind,
-            hero_is_first=(g % 2 == 0),  # alternate position to remove bias
-        )
+    for res in game_results:
         chip_deltas.append(float(res["chip_delta"]))
         if res["hero_won"]:
             wins += 1
-        print("W" if res["hero_won"] else "L", end="", flush=True)
+
+    if n_workers > 1:
+        # Print results after parallel batch completes
+        print("".join("W" if r["hero_won"] else "L" for r in game_results), end="")
 
     print()
 
@@ -121,7 +158,6 @@ def benchmark_vs(
     mean_delta = sum(chip_deltas) / n
     std_delta = math.sqrt(sum((d - mean_delta) ** 2 for d in chip_deltas) / max(n - 1, 1))
     win_rate = wins / n
-    # Wilson / normal approximation confidence interval for win rate
     win_rate_ci = 1.96 * math.sqrt(win_rate * (1 - win_rate) / max(n, 1))
 
     return {
@@ -149,11 +185,8 @@ def run_benchmark(
     model_path: str | None = None,
     save_path: str | None = None,
     plot_save: str | None = None,
+    n_workers: int = 1,
 ) -> dict:
-    from mcts_player import MCTSPlayer
-    from randomplayer import RandomPlayer
-    from raise_player import RaisedPlayer
-
     # Resolve model path
     default_model = _ROOT / "offline_learning" / "models" / "transformer" / "rollout" / "submission_value_model.json"
     if model_path is None and default_model.exists():
@@ -161,28 +194,30 @@ def run_benchmark(
 
     if model_path:
         print(f"Loaded trained model: {model_path}")
-        hero_factory = lambda: MCTSPlayer(simulations=simulations, value_model_path=model_path)
     else:
         print("No trained model found — benchmarking untrained MCTS with default weights.")
-        hero_factory = lambda: MCTSPlayer(simulations=simulations)
 
     opponents = [
-        ("RandomPlayer",       lambda: RandomPlayer()),
-        ("RaisedPlayer",       lambda: RaisedPlayer()),
-        ("MCTSPlayer (no VM)", lambda: MCTSPlayer(simulations=simulations)),
+        ("random",     "RandomPlayer"),
+        ("raised",     "RaisedPlayer"),
+        ("rules",      "RulesBasedPlayer"),
+        ("mcts_no_vm", "MCTSPlayer (no VM)"),
     ]
 
-    print(f"\nRunning benchmark: {n_games} games x {num_rounds} rounds each")
+    print(f"\nRunning benchmark: {n_games} games x {num_rounds} rounds each"
+          + (f" (workers={n_workers})" if n_workers > 1 else ""))
     print("W=hero wins, L=hero loses\n" + "-" * 40)
 
     results: dict = {"opponents": {}}
-    for label, opp_factory in opponents:
+    for opp_spec, label in opponents:
         stats = benchmark_vs(
-            hero_factory=hero_factory,
-            opp_factory=opp_factory,
+            model_path=model_path,
+            simulations=simulations,
+            opp_spec=opp_spec,
             opp_label=label,
             n_games=n_games,
             num_rounds=num_rounds,
+            n_workers=n_workers,
         )
         results["opponents"][label] = stats
         print(
@@ -321,6 +356,7 @@ def run_all_benchmarks(
     num_rounds: int = 50,
     simulations: int = 100,
     models_dir: Path | None = None,
+    n_workers: int = 1,
 ) -> dict[str, dict]:
     """
     Discover every model in models_dir, benchmark each one, save per-model
@@ -351,6 +387,7 @@ def run_all_benchmarks(
             model_path=str(model_path),
             save_path=str(save_dir / "benchmark_results.json"),
             plot_save=str(save_dir / "benchmark.png"),
+            n_workers=n_workers,
         )
         all_results[label] = results
 
@@ -446,6 +483,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default=None, help="Path to a specific value model JSON")
     parser.add_argument("--all", action="store_true",
                         help="Benchmark every model found in models/ and produce a comparison plot")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel game workers per opponent (default: 1 = sequential). "
+                             "Each worker plays one game; set to n_games for max throughput.")
     parser.add_argument(
         "--save",
         type=str,
@@ -464,6 +504,7 @@ if __name__ == "__main__":
             n_games=args.games,
             num_rounds=args.rounds,
             simulations=args.simulations,
+            n_workers=args.workers,
         )
     else:
         run_benchmark(
@@ -473,4 +514,5 @@ if __name__ == "__main__":
             model_path=args.model,
             save_path=args.save,
             plot_save=args.plot_save or None,
+            n_workers=args.workers,
         )
