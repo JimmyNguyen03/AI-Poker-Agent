@@ -32,7 +32,7 @@ BEST_MODEL = (
     / "submission_value_model.json"
 )
 
-SKIP = {"__pycache__", ".git", ".claude", ".DS_Store", ".mypy_cache"}
+SKIP = {"__pycache__", ".git", ".DS_Store", ".mypy_cache"}
 
 # Files inside submission/ that are managed explicitly (not copied from the dir).
 _SUBMISSION_MANAGED = {"submission_value_model.json"}
