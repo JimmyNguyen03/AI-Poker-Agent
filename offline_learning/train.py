@@ -1,13 +1,3 @@
-"""
-Offline training: iterative self-play + SGD on the linear value model.
-
-Usage (from repo root):
-    python offline_learning/train.py
-    python offline_learning/train.py --model mlp
-    python offline_learning/train.py --model transformer
-    python offline_learning/train.py --model all        # trains all three to separate subfolders
-    python offline_learning/train.py --iterations 5 --games-per-iter 10 --rounds-per-game 100 --epochs 10 --lr 0.005
-"""
 
 from __future__ import annotations
 import json
@@ -38,10 +28,6 @@ def make_model(model_type: str):
         return TransformerValueModel()
     return ValueModel()
 
-
-# ------------------------------------------------------------------
-# Picklable worker — must be at module level for multiprocessing spawn
-# ------------------------------------------------------------------
 
 def _game_worker(args: tuple) -> list:
     """
@@ -85,10 +71,6 @@ def _game_worker(args: tuple) -> list:
     )
 
 
-# ------------------------------------------------------------------
-# Core training step
-# ------------------------------------------------------------------
-
 def train(
     data: list[tuple[dict, float]],
     model,
@@ -125,10 +107,6 @@ def train(
     return model, epoch_metrics
 
 
-# ------------------------------------------------------------------
-# Iterative self-play loop
-# ------------------------------------------------------------------
-
 def run_iterative_self_play(
     model_type: str = "linear",
     iterations: int = 3,
@@ -141,28 +119,7 @@ def run_iterative_self_play(
     warmup_iters: int = 2,
     n_workers: int = 1,
 ) -> object:
-    """
-    Main training loop.
-
-    Warmup phase (iterations <= warmup_iters):
-      Games cycle across: RandomPlayer, RaisedPlayer, RulesBasedPlayer — no self-play yet.
-      Diverse opponent mix prevents early overfitting to any single strategy.
-
-    Focus phase (iterations > warmup_iters):
-      Games cycle across: RaisedPlayer, RulesBasedPlayer, frozen past model.
-      RaisedPlayer is kept in rotation so the agent retains fold discipline against
-      pure aggression. Self-play against earlier snapshots is also introduced here.
-
-    Each iteration:
-      1. Play games against the scheduled opponent mix (parallel when n_workers > 1).
-      2. Collect street-discounted (features, target) pairs from p1 only.
-      3. Run SGD for epochs_per_iter passes.
-      4. Snapshot trained model into frozen_pool for future iterations.
-      5. Repeat.
-
-    Saves the trained model to output_path and a training log to the same
-    directory as training_log.json (used by plot_training.py).
-    """
+    """Iterative self-play training loop."""
     model = make_model(model_type)
     # frozen_pool stores (iter_n, path) — temp files that persist until training ends.
     frozen_pool: list[tuple[int, str]] = []
@@ -294,10 +251,6 @@ def run_iterative_self_play(
 
     return model
 
-
-# ------------------------------------------------------------------
-# CLI entry point
-# ------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse

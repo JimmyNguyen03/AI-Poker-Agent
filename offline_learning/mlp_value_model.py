@@ -1,9 +1,3 @@
-"""
-MLP value model: 18 → ReLU(32) → ReLU(16) → clip(1).
-
-Pure numpy; no external ML library required.
-Implements the same predict / update / save / load interface as ValueModel.
-"""
 
 from __future__ import annotations
 import json
@@ -25,7 +19,6 @@ class MLPValueModel:
         H1, H2 = hidden
         rng = np.random.default_rng(seed)
 
-        # He initialisation (appropriate for ReLU activations).
         self.W1 = rng.normal(0.0, np.sqrt(2.0 / D),  (H1, D)).astype(np.float64)
         self.b1 = np.zeros(H1, dtype=np.float64)
         self.W2 = rng.normal(0.0, np.sqrt(2.0 / H1), (H2, H1)).astype(np.float64)
@@ -39,10 +32,6 @@ class MLPValueModel:
         self._t = 0
         self._m = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
         self._v = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
 
     def predict(self, features: dict) -> float:
         x = features_to_vector(features)
@@ -58,36 +47,32 @@ class MLPValueModel:
         pred = float(np.clip(z3, -1.0, 1.0))
         error = pred - target
 
-        # Backprop
         clip_gate = 1.0 if -1.0 < z3 < 1.0 else 0.0
-        dz3 = 2.0 * error * clip_gate                  # scalar
+        dz3 = 2.0 * error * clip_gate
 
-        dW3 = dz3 * h2[np.newaxis, :]                  # (1, H2)
-        db3 = np.array([dz3])                           # (1,)
-        dh2 = self.W3[0] * dz3                          # (H2,)
+        dW3 = dz3 * h2[np.newaxis, :]
+        db3 = np.array([dz3])
+        dh2 = self.W3[0] * dz3
 
-        dz2 = dh2 * (z2 > 0.0)                         # (H2,) ReLU gate
-        dW2 = np.outer(dz2, h1)                        # (H2, H1)
+        dz2 = dh2 * (z2 > 0.0)
+        dW2 = np.outer(dz2, h1)
         db2 = dz2
-        dh1 = self.W2.T @ dz2                          # (H1,)
+        dh1 = self.W2.T @ dz2
 
-        dz1 = dh1 * (z1 > 0.0)                         # (H1,) ReLU gate
-        dW1 = np.outer(dz1, x)                         # (H1, D)
+        dz1 = dh1 * (z1 > 0.0)
+        dW1 = np.outer(dz1, x)
         db1 = dz1
 
         grads = {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2, "W3": dW3, "b3": db3}
 
-        # L2 regularization on weights only
         for p in _WEIGHT_NAMES:
             grads[p] = grads[p] + _WD * getattr(self, p)
 
-        # Gradient clipping (global norm)
         total_norm = np.sqrt(sum(float(np.sum(g ** 2)) for g in grads.values()))
         if total_norm > _CLIP:
             scale = _CLIP / total_norm
             grads = {p: g * scale for p, g in grads.items()}
 
-        # Adam update
         self._t += 1
         t = self._t
         for p, g in grads.items():
@@ -126,12 +111,7 @@ class MLPValueModel:
     def __repr__(self) -> str:
         return f"MLPValueModel(hidden={self._hidden})"
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
     def _forward(self, x: np.ndarray):
-        """Returns (z1, h1, z2, h2, z3_scalar) for use in backprop."""
         z1 = self.W1 @ x + self.b1
         h1 = np.maximum(0.0, z1)
         z2 = self.W2 @ h1 + self.b2

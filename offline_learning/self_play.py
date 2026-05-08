@@ -1,25 +1,3 @@
-"""
-Self-play data generation for offline training.
-
-Runs games between a DataCollectingPlayer and a fixed opponent, records
-(features, target) pairs, and returns them for training.
-
-Target modes
-------------
-rollout   (default) — mean of N abstract rollouts from each child state.
-                      Card-aware, low-variance, matches MCTS leaf evaluation.
-chip_delta            — actual chip change for the round, normalised to [-1, 1]
-                      by initial stack (1000), scaled by a per-street discount so
-                      earlier decisions receive proportionally less credit.
-winner                — +1.0/-1.0 for winning/losing the round pot, scaled by the
-                      same per-street discount as chip_delta.
-mixed                 — per-state blend of rollout and street-discounted chip_delta:
-                          alpha * rollout  +  (1-alpha) * discount * chip_delta
-                      Combines the low variance of rollouts with the ground-truth
-                      signal of real outcomes.
-
-Street discounts (preflop→river): 0.25 / 0.5 / 0.75 / 1.0
-"""
 
 from __future__ import annotations
 import random
@@ -88,10 +66,6 @@ class DataCollectingPlayer(BasePokerPlayer):
         self._pending: list[tuple[str, dict]] = []
         self._data: list[tuple[dict, float]] = []
         self._round_start_stack: int = 0
-
-    # ------------------------------------------------------------------
-    # Engine callbacks
-    # ------------------------------------------------------------------
 
     def declare_action(self, valid_actions, hole_card, round_state):
         from mcts.state import build_state
@@ -212,10 +186,6 @@ class DataCollectingPlayer(BasePokerPlayer):
                 break
         return max(-1.0, min(1.0, (final_stack - self._round_start_stack) / _INITIAL_STACK))
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _pick_action(self, valid_actions: list, state) -> str:
         """
         Choose an action by evaluating each child state — identical to how MCTS
@@ -248,10 +218,6 @@ class DataCollectingPlayer(BasePokerPlayer):
     def get_data(self) -> list[tuple[dict, float]]:
         return list(self._data)
 
-
-# ------------------------------------------------------------------
-# Episode runner
-# ------------------------------------------------------------------
 
 def run_self_play_episode(
     num_rounds: int = 50,

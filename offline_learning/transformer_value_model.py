@@ -1,16 +1,3 @@
-"""
-Minimal transformer value model.
-
-Architecture (single layer, single head):
-  - Each of the N=18 features becomes a d-dim token:
-      H[i] = value[i] * E_scale[i] + E_bias[i]
-  - Scaled dot-product self-attention (Q, K, V projections)
-  - Mean-pool attended context
-  - Linear output, clipped to [-1, 1]
-
-Pure numpy; no external ML library required.
-Implements the same predict / update / save / load interface as ValueModel.
-"""
 
 from __future__ import annotations
 import json
@@ -31,18 +18,15 @@ class TransformerValueModel:
         self._d_model = d_model
         d = d_model
         rng = np.random.default_rng(seed)
-        s = 0.02  # small init keeps early attention near uniform
+        s = 0.02
 
-        # Per-feature learnable (scale, bias) embeddings
         self.E_scale = rng.normal(0.0, s, (_N, d)).astype(np.float64)
         self.E_bias  = rng.normal(0.0, s, (_N, d)).astype(np.float64)
 
-        # Attention projections
         self.W_Q = rng.normal(0.0, s, (d, d)).astype(np.float64)
         self.W_K = rng.normal(0.0, s, (d, d)).astype(np.float64)
         self.W_V = rng.normal(0.0, s, (d, d)).astype(np.float64)
 
-        # Output linear layer
         self.W_out = rng.normal(0.0, s, (1, d)).astype(np.float64)
         self.b_out  = np.zeros(1, dtype=np.float64)
 
@@ -52,10 +36,6 @@ class TransformerValueModel:
         self._t = 0
         self._m = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
         self._v = {p: np.zeros_like(getattr(self, p)) for p in _PARAM_NAMES}
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
 
     def predict(self, features: dict) -> float:
         x = features_to_vector(features)
@@ -73,46 +53,38 @@ class TransformerValueModel:
         x_v, H, Q, K, V, attn, context, pooled, out_scalar = cache
         d = self._d_model
 
-        # Backward through clip
         clip_gate = 1.0 if -1.0 < out_scalar < 1.0 else 0.0
-        dout = 2.0 * error * clip_gate                   # scalar
+        dout = 2.0 * error * clip_gate
 
-        # Output linear
-        dW_out  = dout * pooled[np.newaxis, :]           # (1, d)
-        db_out  = np.array([dout])                       # (1,)
-        dpooled = self.W_out[0] * dout                   # (d,)
+        dW_out  = dout * pooled[np.newaxis, :]
+        db_out  = np.array([dout])
+        dpooled = self.W_out[0] * dout
 
-        # Mean pool: context → pooled
-        dcontext = np.tile(dpooled, (_N, 1)) / _N        # (N, d)
+        dcontext = np.tile(dpooled, (_N, 1)) / _N
 
-        # context = attn @ V
-        dV    = attn.T @ dcontext                        # (N, d)
-        dattn = dcontext @ V.T                           # (N, N)
+        dV    = attn.T @ dcontext
+        dattn = dcontext @ V.T
 
-        # Softmax backward (row-wise): ds_i = s_i * (d_i - s_i·d_i)
         d_scores = np.empty((_N, _N), dtype=np.float64)
         for i in range(_N):
             s = attn[i]
             d_scores[i] = s * (dattn[i] - np.dot(dattn[i], s))
-        d_scores /= np.sqrt(d)                           # undo scale
+        d_scores /= np.sqrt(d)
 
-        # scores = Q @ K.T / sqrt(d)
-        dQ = d_scores @ K                                # (N, d)
-        dK = d_scores.T @ Q                             # (N, d)
+        dQ = d_scores @ K
+        dK = d_scores.T @ Q
 
-        # Q/K/V = H @ W_*
-        dW_Q  = H.T @ dQ                                # (d, d)
-        dH_Q  = dQ @ self.W_Q.T                         # (N, d)
-        dW_K  = H.T @ dK                                # (d, d)
-        dH_K  = dK @ self.W_K.T                         # (N, d)
-        dW_V  = H.T @ dV                                # (d, d)
-        dH_V  = dV @ self.W_V.T                         # (N, d)
+        dW_Q  = H.T @ dQ
+        dH_Q  = dQ @ self.W_Q.T
+        dW_K  = H.T @ dK
+        dH_K  = dK @ self.W_K.T
+        dW_V  = H.T @ dV
+        dH_V  = dV @ self.W_V.T
 
-        dH = dH_Q + dH_K + dH_V                        # (N, d)
+        dH = dH_Q + dH_K + dH_V
 
-        # H[i] = value[i] * E_scale[i] + E_bias[i]
-        dE_scale = dH * x_v[:, np.newaxis]              # (N, d)
-        dE_bias  = dH                                   # (N, d)
+        dE_scale = dH * x_v[:, np.newaxis]
+        dE_bias  = dH
 
         grads = {
             "E_scale": dE_scale, "E_bias": dE_bias,
@@ -120,17 +92,14 @@ class TransformerValueModel:
             "W_out": dW_out, "b_out": db_out,
         }
 
-        # L2 regularization on weights only
         for p in _WEIGHT_NAMES:
             grads[p] = grads[p] + _WD * getattr(self, p)
 
-        # Gradient clipping (global norm)
         total_norm = np.sqrt(sum(float(np.sum(g ** 2)) for g in grads.values()))
         if total_norm > _CLIP:
             scale = _CLIP / total_norm
             grads = {p: g * scale for p, g in grads.items()}
 
-        # Adam update
         self._t += 1
         t = self._t
         for p, g in grads.items():
@@ -177,32 +146,22 @@ class TransformerValueModel:
     def __repr__(self) -> str:
         return f"TransformerValueModel(d_model={self._d_model})"
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
     def _forward(self, x: np.ndarray):
-        """
-        Full forward pass. Returns (pred, cache) where cache holds all
-        intermediates needed for backprop.
-        """
         d = self._d_model
 
-        # Token embeddings: each feature gets its own d-dim representation
-        H = x[:, np.newaxis] * self.E_scale + self.E_bias   # (N, d)
+        H = x[:, np.newaxis] * self.E_scale + self.E_bias
 
-        Q = H @ self.W_Q   # (N, d)
-        K = H @ self.W_K   # (N, d)
-        V = H @ self.W_V   # (N, d)
+        Q = H @ self.W_Q
+        K = H @ self.W_K
+        V = H @ self.W_V
 
-        # Scaled dot-product attention (numerically stable softmax)
-        scores = Q @ K.T / np.sqrt(d)                        # (N, N)
+        scores = Q @ K.T / np.sqrt(d)
         scores -= scores.max(axis=1, keepdims=True)
         exp_s  = np.exp(scores)
-        attn   = exp_s / exp_s.sum(axis=1, keepdims=True)    # (N, N)
+        attn   = exp_s / exp_s.sum(axis=1, keepdims=True)
 
-        context = attn @ V                                    # (N, d)
-        pooled  = context.mean(axis=0)                       # (d,)
+        context = attn @ V
+        pooled  = context.mean(axis=0)
 
         out_scalar = float((self.W_out @ pooled + self.b_out)[0])
         pred = float(np.clip(out_scalar, -1.0, 1.0))

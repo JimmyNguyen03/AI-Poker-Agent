@@ -1,9 +1,3 @@
-"""
-Linear value model: predicts hero's expected outcome in [-1, 1] from state features.
-
-Also exports FEATURE_KEYS and features_to_vector used by all model types,
-and load_value_model which is a factory that auto-detects model type from JSON.
-"""
 
 from __future__ import annotations
 import json
@@ -11,7 +5,6 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-# Canonical feature order shared by all model types.
 FEATURE_KEYS: tuple[str, ...] = (
     "win_rate", "hand_strength_norm", "hand_group_norm",
     "pot_odds", "call_price_stack_fraction", "raise_price_stack_fraction",
@@ -28,8 +21,6 @@ def features_to_vector(features: dict[str, float]) -> np.ndarray:
     return np.array([features.get(k, 0.0) for k in FEATURE_KEYS], dtype=np.float64)
 
 
-# Initial weights drawn from hand_features.FEATURE_WEIGHTS, extended with
-# the full feature set produced by offline_learning/features.py.
 DEFAULT_WEIGHTS: dict[str, float] = {
     "win_rate": 1.60,
     "hand_strength_norm": 0.45,
@@ -54,7 +45,6 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 
 
 class ValueModel:
-    """Simple linear dot-product evaluator over state features."""
 
     def __init__(self, weights: Optional[dict[str, float]] = None):
         self.weights: dict[str, float] = dict(DEFAULT_WEIGHTS)
@@ -95,10 +85,6 @@ class ValueModel:
 
 
 def load_value_model(path: str):
-    """
-    Factory: load any model type from a JSON checkpoint.
-    Detects type via the 'model_type' key; defaults to linear for legacy files.
-    """
     with open(path, "r") as f:
         data = json.load(f)
     model_type = data.get("model_type", "linear")

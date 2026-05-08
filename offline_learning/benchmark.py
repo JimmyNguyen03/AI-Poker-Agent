@@ -1,15 +1,3 @@
-"""
-Benchmark the trained value model against three baselines:
-  - RandomPlayer   (random action each turn)
-  - RaisedPlayer   (always raise, else call)
-  - MCTSPlayer()   (MCTS with no value model — untrained baseline)
-
-Usage (from repo root):
-    python offline_learning/benchmark.py
-    python offline_learning/benchmark.py --games 20 --rounds 100
-    python offline_learning/benchmark.py --model offline_learning/models/mlp/submission_value_model.json
-    python offline_learning/benchmark.py --all          # runs every model found in models/
-"""
 
 from __future__ import annotations
 import json
@@ -35,10 +23,6 @@ if not hasattr(signal, "SIGALRM"):
 
 from pypokerengine.api.game import setup_config, start_poker
 
-
-# ------------------------------------------------------------------
-# Picklable worker — must be at module level for multiprocessing spawn
-# ------------------------------------------------------------------
 
 def _bench_worker(args: tuple) -> dict:
     """
@@ -100,10 +84,6 @@ def _bench_worker(args: tuple) -> dict:
         "hero_won":   hero_stack > opp_stack,
     }
 
-
-# ------------------------------------------------------------------
-# Per-opponent benchmark
-# ------------------------------------------------------------------
 
 def benchmark_vs(
     model_path: str | None,
@@ -173,10 +153,6 @@ def benchmark_vs(
         "std_chip_delta": std_delta,
     }
 
-
-# ------------------------------------------------------------------
-# Main benchmark runner
-# ------------------------------------------------------------------
 
 def run_benchmark(
     n_games: int = 10,
@@ -258,10 +234,6 @@ def _write_json_log(path: Path | str, payload: dict, label: str) -> None:
     print(f"{label} -> {path}")
 
 
-# ------------------------------------------------------------------
-# Plotting
-# ------------------------------------------------------------------
-
 def _plot_benchmark(results: dict, save_path: str | None = None) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
@@ -319,10 +291,6 @@ def _plot_benchmark(results: dict, save_path: str | None = None) -> None:
     else:
         plt.show()
 
-
-# ------------------------------------------------------------------
-# --all helpers
-# ------------------------------------------------------------------
 
 def _find_all_models(models_dir: Path) -> list[tuple[str, Path]]:
     """
@@ -468,10 +436,6 @@ def _plot_comparison(all_results: dict[str, dict], save_path: Path) -> None:
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     print(f"\nComparison plot saved -> {save_path}")
 
-
-# ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse
