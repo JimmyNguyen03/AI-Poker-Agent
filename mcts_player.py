@@ -85,9 +85,9 @@ def setup_ai():
     # In the tournament zip, mcts_player.py lives inside submission/ next to the model.
     # In the dev repo, submission/ is a sibling directory.
     for candidate in [
-        here / "submission_value_model.json",                          # zip: submission/
-        here / "submission" / "submission_value_model.json",           # dev repo
-        here / "offline_learning" / "models" / "submission_value_model.json",  # legacy
+        here / "submission_value_model.json",                                                        # zip: submission/
+        here / "submission" / "submission_value_model.json",                                         # dev repo
+        here / "offline_learning" / "models" / "transformer" / "rollout" / "submission_value_model.json",  # best model
     ]:
         submission = candidate
         if submission.is_file():

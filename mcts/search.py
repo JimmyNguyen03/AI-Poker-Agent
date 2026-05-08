@@ -123,11 +123,12 @@ def _rollout_value(state: PokerState) -> float:
         # Opp folded: pot was set to 0 by _apply_heuristic_transition.
         if state.pot_main == 0:
             return 1.0
-        # Hero folded: hero gave up the hand — neutral outcome (saved remaining chips
-        # but lost pot equity). Using 0.0 separates this from a winning call-down
-        # (+hand_advantage) so MCTS correctly prefers calling good hands over folding.
+        # Hero folded: hero loses whatever is in the pot to the opponent.
+        # Reflect the actual chip imbalance so MCTS correctly weighs fold vs call.
         if state.hero_folded:
-            return 0.0
+            total = state.hero_stack + state.opp_stack + state.pot_main
+            stack_delta = state.hero_stack - (state.opp_stack + state.pot_main)
+            return max(-1.0, min(1.0, stack_delta / max(total, 1)))
         # Called down to abstract showdown — hand strength determines the result.
         return max(-1.0, min(1.0, hand_advantage))
 

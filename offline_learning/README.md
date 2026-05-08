@@ -24,6 +24,9 @@ python offline_learning/train.py --iterations 2 --games-per-iter 3 --rounds-per-
 # Longer training for submission (~20-40 min depending on hardware)
 python offline_learning/train.py --iterations 5 --games-per-iter 10 --rounds-per-game 100 --epochs 10 --lr 0.005
 
+# Control warmup length (default 2): first N iters use Random/Raised, rest use RulesBasedPlayer
+python offline_learning/train.py --iterations 10 --warmup-iters 3
+
 # Train a specific model architecture
 python offline_learning/train.py --model mlp
 python offline_learning/train.py --model transformer
@@ -101,8 +104,10 @@ python offline_learning/benchmark.py --plot-save ""
 
 ```bash
 # Step 1 — train all model types and target modes
+#   3 warmup iters vs Random/Raised, then 7 focus iters vs RulesBasedPlayer + frozen self
 python offline_learning/train.py --model all --target all \
-    --iterations 5 --games-per-iter 10 --rounds-per-game 100 --epochs 10 --lr 0.005
+    --iterations 10 --warmup-iters 3 \
+    --games-per-iter 20 --rounds-per-game 100 --epochs 10 --lr 0.005
 
 # Step 2 — benchmark every discovered model in one pass
 python offline_learning/benchmark.py --all --games 20 --rounds 100
@@ -124,6 +129,7 @@ python offline_learning/plot_training.py \
 | `mlp_value_model.py` | `MLPValueModel` — two-hidden-layer MLP (18→ReLU(32)→ReLU(16)→clip) |
 | `transformer_value_model.py` | `TransformerValueModel` — single-layer self-attention over feature tokens |
 | `self_play.py` | `DataCollectingPlayer`, `run_self_play_episode()` — epsilon-greedy self-play |
+| `rules_player.py` | `RulesBasedPlayer` — hand-strength + pot-odds opponent for focus-phase training |
 | `train.py` | `train()` (SGD/Adam), `run_iterative_self_play()`, CLI |
 | `plot_training.py` | MSE curves + data-volume bar chart from `training_log.json` |
 | `benchmark.py` | Win-rate + chip-delta bars with error against 3 baselines |
@@ -160,11 +166,23 @@ python offline_learning/plot_training.py \
    MCTS evaluates at its leaves — keeping training and inference distributions aligned.
    Fold transitions are excluded (they are terminal; MCTS handles them via `_rollout_value`).
 
-5. **Training** — SGD on MSE (linear) or Adam on MSE (MLP / transformer).
+5. **Opponent schedule** — training runs in two phases controlled by `--warmup-iters`:
 
-6. **Iteration** — collect data with current model → train → better policy → repeat.
+   | Phase | Iterations | Opponent mix |
+   |---|---|---|
+   | Warmup | `<= warmup_iters` | Random · Raised · `RulesBasedPlayer` — no self-play yet |
+   | Focus  | `> warmup_iters`  | `RulesBasedPlayer` · frozen past self · frozen past self |
+
+   The warmup phase exposes the model to diverse opponent styles (random, always-raise,
+   and hand-strength-aware) to prevent early overfitting. The focus phase drops Random
+   and Raised in favour of self-play against frozen snapshots, while keeping
+   `RulesBasedPlayer` as the fixed opponent to maintain a reasoned training target.
+
+6. **Training** — SGD on MSE (linear) or Adam on MSE (MLP / transformer).
+
+7. **Iteration** — collect data with current model → train → better policy → repeat.
    Frozen snapshots of past models are used as opponents so the agent learns to beat
-   its own earlier behaviour, not just random baselines.
+   its own earlier behaviour, not just the fixed opponent baseline.
 
 ---
 
@@ -177,6 +195,7 @@ python offline_learning/plot_training.py \
 | `--model` | `linear` | Architecture: `linear`, `mlp`, `transformer`, or `all` |
 | `--target` | `rollout` | Training target: `rollout`, `chip_delta`, `winner`, `mixed`, or `all` |
 | `--iterations` | 3 | Self-play/train cycles |
+| `--warmup-iters` | 2 | Iters using Random/Raised before switching to `RulesBasedPlayer` |
 | `--games-per-iter` | 5 | Games per iteration |
 | `--rounds-per-game` | 50 | Rounds per game |
 | `--epochs` | 5 | SGD/Adam epochs per iteration |

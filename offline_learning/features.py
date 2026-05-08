@@ -13,7 +13,7 @@ from mcts.state import PokerState
 _STREET_IDX = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
 
 # More sims reduce MC variance so rollout labels and features use similar estimates.
-_WIN_RATE_SIMS = 50
+_WIN_RATE_SIMS = 20
 
 # Canonical street key per community-card count: ensures features and rollout both
 # hit the same LRU cache entry when they have the same hole + community cards.

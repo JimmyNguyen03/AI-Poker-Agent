@@ -155,7 +155,7 @@ def run_benchmark(
     from raise_player import RaisedPlayer
 
     # Resolve model path
-    default_model = _ROOT / "offline_learning" / "models" / "submission_value_model.json"
+    default_model = _ROOT / "offline_learning" / "models" / "transformer" / "rollout" / "submission_value_model.json"
     if model_path is None and default_model.exists():
         model_path = str(default_model)
 
@@ -442,19 +442,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark trained MCTS value model vs baselines")
     parser.add_argument("--games", type=int, default=10, help="Games per opponent")
     parser.add_argument("--rounds", type=int, default=50, help="Rounds per game")
-    parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations per action")
+    parser.add_argument("--simulations", type=int, default=200, help="MCTS simulations per action")
     parser.add_argument("--model", type=str, default=None, help="Path to a specific value model JSON")
     parser.add_argument("--all", action="store_true",
                         help="Benchmark every model found in models/ and produce a comparison plot")
     parser.add_argument(
         "--save",
         type=str,
-        default=str(_ROOT / "offline_learning" / "models" / "benchmark_results.json"),
+        default=str(_ROOT / "offline_learning" / "models" / "transformer" / "rollout" / "benchmark_results.json"),
     )
     parser.add_argument(
         "--plot-save",
         type=str,
-        default=str(_ROOT / "offline_learning" / "models" / "benchmark.png"),
+        default=str(_ROOT / "offline_learning" / "models" / "transformer" / "rollout" / "benchmark.png"),
         help="Save plot to file (default: benchmark.png). Pass '' to show interactively.",
     )
     args = parser.parse_args()

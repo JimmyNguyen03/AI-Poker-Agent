@@ -64,7 +64,7 @@ _EPSILON = 0.15
 # Number of abstract rollouts used to label each training example.
 # Rollouts use the same card-aware _rollout_value as MCTS, giving low-variance
 # labels that directly measure hand strength + opponent belief.
-_N_ROLLOUTS = 10
+_N_ROLLOUTS = 5
 
 
 class DataCollectingPlayer(BasePokerPlayer):
@@ -107,15 +107,17 @@ class DataCollectingPlayer(BasePokerPlayer):
         )
         action = self._pick_action(valid_actions, state)
 
-        # Record the POST-ACTION child state — this is exactly what MCTS evaluates
-        # at its leaves, so training and inference share the same feature distribution.
-        # Fold produces a terminal child handled by _rollout_value in MCTS (never
-        # calls the value model), so we skip fold to keep distributions aligned.
+        # Record the POST-ACTION child state for non-fold actions.
+        # For fold actions we also record training data: the fold value is
+        # deterministic (no rollout needed) so examples go directly to _data.
         child_state = _apply_heuristic_transition(state, action)
-        if not child_state.is_terminal():
+        if child_state.is_terminal():
+            if child_state.hero_folded:
+                child_features = state_to_features(child_state)
+                fold_val = self._fold_label(pre_state=state, fold_child=child_state)
+                self._data.append((child_features, max(-1.0, min(1.0, fold_val))))
+        else:
             child_features = state_to_features(child_state)
-            # Store the full state alongside features so we can run rollouts at
-            # round end to produce card-aware, low-variance training labels.
             self._pending.append((child_state, child_features))
 
         return action
@@ -178,6 +180,24 @@ class DataCollectingPlayer(BasePokerPlayer):
                 self._data.append((child_features, label))
 
         self._pending = []
+
+    def _fold_label(self, pre_state, fold_child) -> float:
+        """
+        Immediate label for a hero fold. No round-end data needed — outcome is deterministic.
+        Uses pre_state.street for discount and pre_state.hero_stack for chip delta.
+        """
+        from mcts.search import _rollout_value
+        disc = _STREET_DISCOUNT.get(pre_state.street, 1.0)
+        rollout = _rollout_value(fold_child)  # now chip-loss-aware, not fixed 0.0
+        if self._target_mode == "rollout":
+            return rollout
+        cd = (pre_state.hero_stack - self._round_start_stack) / _INITIAL_STACK
+        if self._target_mode == "chip_delta":
+            return disc * cd
+        if self._target_mode == "winner":
+            return disc * -1.0
+        # mixed
+        return _MIXED_ALPHA * rollout + (1.0 - _MIXED_ALPHA) * disc * cd
 
     def _chip_delta(self, round_state) -> float:
         """Chip change this round normalised by initial stack, in [-1, 1]. Not yet discounted."""

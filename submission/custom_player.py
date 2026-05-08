@@ -47,8 +47,8 @@ class CustomPlayer(MCTSPlayer):
             # Model lives next to this file in submission/
             submission = Path(__file__).resolve().parent / "submission_value_model.json"
             if not submission.is_file():
-                # Fallback: legacy path from repo root
-                submission = _ROOT / "offline_learning" / "models" / "submission_value_model.json"
+                # Fallback: best model from repo root
+                submission = _ROOT / "offline_learning" / "models" / "transformer" / "rollout" / "submission_value_model.json"
             if submission.is_file():
                 kwargs = {"value_model_path": str(submission)}
         super().__init__(**kwargs)
